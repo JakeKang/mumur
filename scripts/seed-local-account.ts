@@ -1,6 +1,6 @@
-const crypto = require("node:crypto");
-const path = require("node:path");
-const Database = require("better-sqlite3");
+import crypto from "node:crypto";
+import path from "node:path";
+import Database from "better-sqlite3";
 
 const EMAIL = process.env.LOCAL_SEED_EMAIL || "localtester@mumur.local";
 const PASSWORD = process.env.LOCAL_SEED_PASSWORD || "mumur1234!";
@@ -8,7 +8,7 @@ const NAME = process.env.LOCAL_SEED_NAME || "Local Tester";
 const TEAM_NAME = process.env.LOCAL_SEED_TEAM || "Local Team";
 const DB_PATH = process.env.NEXT_DB_PATH || path.resolve(process.cwd(), "data", "mumur.db");
 
-function hashPassword(password) {
+function hashPassword(password: string) {
   const salt = crypto.randomBytes(16).toString("hex");
   const hash = crypto.scryptSync(password, salt, 64).toString("hex");
   return `${salt}:${hash}`;
@@ -22,7 +22,7 @@ function run() {
   const passwordHash = hashPassword(PASSWORD);
   const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(EMAIL);
 
-  let userId;
+  let userId: number;
   if (existingUser) {
     userId = existingUser.id;
     db.prepare("UPDATE users SET name = ?, password_hash = ? WHERE id = ?").run(NAME, passwordHash, userId);

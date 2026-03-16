@@ -8,7 +8,13 @@ const toneMap = {
   neutral: "border-[#e8e6e3] bg-white text-[#787774]"
 };
 
-export function PriorityBadge({ level = "neutral", label, className }) {
+type PriorityBadgeProps = {
+  level?: string;
+  label?: string;
+  className?: string;
+};
+
+export function PriorityBadge({ level = "neutral", label, className }: PriorityBadgeProps) {
   const tone = toneMap[level] || toneMap.neutral;
   const text = label || priorityLabel(level);
   return (

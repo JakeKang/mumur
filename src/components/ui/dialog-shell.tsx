@@ -1,5 +1,16 @@
 import { useEffect } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+
+type DialogShellProps = {
+  open: boolean;
+  title: string;
+  description?: string;
+  onClose: () => void;
+  children: ReactNode;
+  maxWidthClass?: string;
+  footer?: ReactNode;
+};
 
 export function DialogShell({
   open,
@@ -9,12 +20,12 @@ export function DialogShell({
   children,
   maxWidthClass = "max-w-xl",
   footer
-}) {
+}: DialogShellProps) {
   useEffect(() => {
     if (!open) {
       return;
     }
-    const onKeyDown = (event) => {
+    const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         onClose();
       }

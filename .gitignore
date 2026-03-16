@@ -12,3 +12,5 @@ next-env.d.ts
 .sisyphus/
 docs/
 mvp-smoke-team-page.png
+playwright-report/
+test-results/

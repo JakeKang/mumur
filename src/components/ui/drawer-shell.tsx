@@ -1,5 +1,15 @@
 import { useEffect } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+
+type DrawerShellProps = {
+  open: boolean;
+  title: string;
+  description?: string;
+  onClose: () => void;
+  children: ReactNode;
+  widthClass?: string;
+};
 
 export function DrawerShell({
   open,
@@ -8,12 +18,12 @@ export function DrawerShell({
   onClose,
   children,
   widthClass = "max-w-2xl"
-}) {
+}: DrawerShellProps) {
   useEffect(() => {
     if (!open) {
       return;
     }
-    const onKeyDown = (event) => {
+    const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         onClose();
       }

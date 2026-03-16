@@ -28,7 +28,7 @@ const NOTIFICATION_TYPES = [
   "integration.webhook.updated"
 ];
 
-async function api(path, options = {}) {
+async function api(path: string, options: RequestInit = {}) {
   const response = await fetch(path, {
     credentials: "include",
     headers: {
@@ -45,10 +45,10 @@ async function api(path, options = {}) {
   return json;
 }
 
-function blockSeed() {
+function blockSeed(type = "text") {
   return {
     id: `block-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
-    type: "text",
+    type,
     content: "",
     checked: false
   };
@@ -498,7 +498,7 @@ export default function HomePage() {
   );
 
   const selectIdea = useCallback(
-    async (ideaId, options = { syncUrl: true, openPage: true }) => {
+    async (ideaId, options: { syncUrl?: boolean; openPage?: boolean } = { syncUrl: true, openPage: true }) => {
       const data = await api(`/api/ideas/${ideaId}`);
       setSelectedIdeaId(ideaId);
       setSelectedIdea(data.idea);
@@ -508,7 +508,7 @@ export default function HomePage() {
         setActivePage("detail");
       }
       await loadIdeaChildren(ideaId);
-      if (options.syncUrl && typeof window !== "undefined") {
+      if (options.syncUrl !== false && typeof window !== "undefined") {
         const params = new URLSearchParams(window.location.search);
         params.set("idea", String(ideaId));
         window.history.replaceState(null, "", `?${params.toString()}`);
@@ -1360,15 +1360,6 @@ export default function HomePage() {
               <div className="absolute right-0 top-0 h-full w-full max-w-xl overflow-auto border-l border-[var(--border)] bg-[var(--surface)] p-4 shadow-2xl">
                 <ContextPanel
                   dashboard={dashboard}
-                  IDEA_STATUS={IDEA_STATUS}
-                  STATUS_META={STATUS_META}
-                  selectedIdea={selectedIdea}
-                  studioTab={studioTab}
-                  onJumpTab={setStudioTab}
-                  versions={versions}
-                  timeline={timeline}
-                  notificationPanelOpen={notificationPanelOpen}
-                  setNotificationPanelOpen={setNotificationPanelOpen}
                   utilitySection={utilitySection}
                   setUtilitySection={setUtilitySection}
                   onRequestClose={closeUtilityPanel}

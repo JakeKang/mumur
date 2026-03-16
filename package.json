@@ -7,11 +7,12 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3001",
     "lint": "eslint",
-    "seed:local": "node scripts/seed-local-account.js",
-    "test": "pnpm run build && node --test test/next-api.test.js",
-    "check": "node --check scripts/seed-local-account.js && pnpm run lint"
+    "seed:local": "tsx scripts/seed-local-account.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test",
+    "check": "pnpm run typecheck && pnpm run lint"
   },
   "keywords": [],
   "author": "",
@@ -28,10 +29,16 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
-    "tailwindcss": "^4"
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
