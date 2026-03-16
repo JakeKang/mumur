@@ -1,0 +1,14 @@
+node_modules/
+data/
+npm-debug.log*
+.next/
+public/uploads/
+.DS_Store
+*.pem
+.env*
+.vercel
+next-env.d.ts
+*.tsbuildinfo
+.sisyphus/
+docs/
+mvp-smoke-team-page.png
