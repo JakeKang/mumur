@@ -895,16 +895,14 @@ export default function HomePage() {
     }
   };
 
-  const handleReaction = async (emoji) => {
-    if (!selectedIdeaId) {
-      return;
-    }
+  const handleReaction = async (emoji, targetType = "idea", targetId = "") => {
+    if (!selectedIdeaId) return;
     try {
       await api(`/api/ideas/${selectedIdeaId}/reactions`, {
         method: "POST",
-        body: JSON.stringify({ emoji })
+        body: JSON.stringify({ emoji, targetType, targetId })
       });
-      const data = await api(`/api/ideas/${selectedIdeaId}/reactions`);
+      const data = await api(`/api/ideas/${selectedIdeaId}/reactions?targetType=${targetType}&targetId=${encodeURIComponent(targetId)}`);
       setReactions(data);
       await loadIdeas();
     } catch (err) {

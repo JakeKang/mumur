@@ -152,6 +152,42 @@ export function EditorBlock({
     );
   }
 
+  if (block.type === "file") {
+    const fileData = (() => {
+      try { return block.content ? JSON.parse(block.content) : null; } catch { return null; }
+    })();
+    if (fileData?.name) {
+      return (
+        <div className="flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+          <span className="text-2xl">📎</span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-[var(--foreground)]">{fileData.name}</p>
+            {fileData.size && <p className="text-xs text-[var(--muted)]">{(fileData.size / 1024).toFixed(1)} KB</p>}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <label className="flex cursor-pointer items-center gap-3 rounded-lg border-2 border-dashed border-[var(--border)] bg-[var(--surface-strong)] p-4 hover:border-[var(--accent)]/50 transition">
+        <span className="text-2xl">📎</span>
+        <div>
+          <p className="text-sm font-medium text-[var(--foreground)]">파일 선택</p>
+          <p className="text-xs text-[var(--muted)]">클릭하여 첨부</p>
+        </div>
+        <input
+          type="file"
+          className="hidden"
+          accept="*/*"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            onChange(JSON.stringify({ name: file.name, size: file.size, type: file.type }));
+          }}
+        />
+      </label>
+    );
+  }
+
   // --- Checklist (render mode) ---
   if (!isEditing && block.type === "checklist") {
     return (

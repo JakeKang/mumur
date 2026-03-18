@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Idea, IdeaStatus } from "@/types";
+import type { Idea, IdeaStatus, Comment } from "@/types";
 import { STATUS_META as STATUS_META_DEFAULT } from "@/lib/idea-status";
 import { EditorBlock } from "./EditorBlock";
 import type { EditorBlockData, BlockType } from "./EditorBlock";
 import { useAutoSave } from "./useAutoSave";
 import type { SaveStatus } from "./useAutoSave";
+
+const QUICK_EMOJIS = ["👍", "❤️", "🎉", "😮", "🤔"];
 
 function genId() {
   return `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -65,6 +67,8 @@ type BlockRowProps = {
   total: number;
   isEditing: boolean;
   isDragOver: boolean;
+  commentCount: number;
+  blockReactions: { emoji: string; count: number; mine: boolean }[];
   onFocus: () => void;
   onChange: (content: string, type?: BlockType) => void;
   onEnter: () => void;
@@ -73,6 +77,8 @@ type BlockRowProps = {
   onDragStart: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: () => void;
+  onOpenComments: () => void;
+  onReaction: (emoji: string) => void;
 };
 
 function BlockRow({
@@ -81,6 +87,8 @@ function BlockRow({
   total,
   isEditing,
   isDragOver,
+  commentCount,
+  blockReactions,
   onFocus,
   onChange,
   onEnter,
@@ -89,8 +97,11 @@ function BlockRow({
   onDragStart,
   onDragOver,
   onDrop,
+  onOpenComments,
+  onReaction,
 }: BlockRowProps) {
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
+  const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
 
   return (
@@ -167,6 +178,61 @@ function BlockRow({
           onEnter={onEnter}
           onDelete={onDelete}
         />
+
+        {blockReactions.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {blockReactions.map((r) => (
+              <button
+                key={r.emoji}
+                type="button"
+                onClick={() => onReaction(r.emoji)}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${r.mine ? "border-[var(--accent)] bg-[var(--accent)]/10" : "border-[var(--border)] hover:border-[var(--accent)]/50"}`}
+              >
+                {r.emoji} {r.count}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="invisible ml-1 flex shrink-0 items-start gap-1 pt-1 group-hover/row:visible">
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setReactionPickerOpen((v) => !v)}
+            title="리액션 추가"
+            aria-label="리액션 추가"
+            className="rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)]"
+          >
+            😊
+          </button>
+          {reactionPickerOpen && (
+            <div className="absolute right-0 top-6 z-50 flex gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-lg">
+              {QUICK_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  onClick={() => { onReaction(emoji); setReactionPickerOpen(false); }}
+                  className="rounded p-1 text-base hover:bg-[var(--surface-strong)] transition"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {commentCount > 0 && (
+          <button
+            type="button"
+            onClick={onOpenComments}
+            title={`댓글 ${commentCount}개`}
+            aria-label={`댓글 ${commentCount}개`}
+            className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-1.5 py-0.5 text-xs text-[var(--muted)] hover:border-[var(--accent)]/50 transition"
+          >
+            💬 {commentCount}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -174,21 +240,31 @@ function BlockRow({
 
 type BlockEditorProps = {
   idea: Idea;
+  comments?: Comment[];
   onSaveBlocks: (blocks: EditorBlockData[]) => Promise<void>;
   onSaveTitle: (title: string) => Promise<void>;
   onSaveStatus?: (status: IdeaStatus) => Promise<void>;
+  onOpenBlockComments?: (blockId: string) => void;
+  onBlockReaction?: (blockId: string, emoji: string) => void;
   STATUS_META: typeof STATUS_META_DEFAULT;
   formatTime: (ts: number) => string;
 };
 
 export function BlockEditor({
   idea,
+  comments = [],
   onSaveBlocks,
   onSaveTitle,
   onSaveStatus,
   STATUS_META,
   formatTime,
+  onOpenBlockComments,
+  onBlockReaction,
 }: BlockEditorProps) {
+  const commentsByBlock = comments.reduce<Record<string, number>>((acc, c) => {
+    if (c.blockId) acc[c.blockId] = (acc[c.blockId] ?? 0) + 1;
+    return acc;
+  }, {});
   const [blocks, setBlocks] = useState<EditorBlockData[]>(() => toEditorBlocks(idea.blocks));
   const [title, setTitle] = useState(idea.title ?? "");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -340,6 +416,8 @@ export function BlockEditor({
             total={blocks.length}
             isEditing={editingIndex === index}
             isDragOver={dragOverIndex === index}
+            commentCount={commentsByBlock[block.id] ?? 0}
+            blockReactions={[]}
             onFocus={() => setEditingIndex(index)}
             onChange={(content, type) => handleChange(index, content, type)}
             onEnter={() => addBlock(index)}
@@ -348,6 +426,8 @@ export function BlockEditor({
             onDragStart={() => setDragIndex(index)}
             onDragOver={() => setDragOverIndex(index)}
             onDrop={() => handleDrop(index)}
+            onOpenComments={() => onOpenBlockComments?.(block.id)}
+            onReaction={(emoji) => onBlockReaction?.(block.id, emoji)}
           />
         ))}
 

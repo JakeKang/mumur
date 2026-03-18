@@ -1228,13 +1228,16 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "reactions" && method === "GET") {
+      const reactionUrl = new URL(request.url);
+      const targetType = normalizeText(reactionUrl.searchParams.get("targetType")) || "idea";
+      const targetId = normalizeText(reactionUrl.searchParams.get("targetId")) || "";
       const reactions = db
-        .prepare("SELECT emoji, COUNT(*) AS count FROM reactions WHERE idea_id = ? GROUP BY emoji ORDER BY count DESC, emoji ASC")
-        .all(ideaId)
+        .prepare("SELECT emoji, COUNT(*) AS count FROM reactions WHERE idea_id = ? AND target_type = ? AND target_id = ? GROUP BY emoji ORDER BY count DESC, emoji ASC")
+        .all(ideaId, targetType, targetId)
         .map((row) => ({ emoji: row.emoji, count: row.count }));
       const mine = db
-        .prepare("SELECT emoji FROM reactions WHERE idea_id = ? AND user_id = ?")
-        .all(ideaId, ctx.user.id)
+        .prepare("SELECT emoji FROM reactions WHERE idea_id = ? AND user_id = ? AND target_type = ? AND target_id = ?")
+        .all(ideaId, ctx.user.id, targetType, targetId)
         .map((row) => row.emoji);
       return json({ reactions, mine });
     }
@@ -1242,22 +1245,21 @@ async function handleRequest(request, slug, method) {
     if (s[2] === "reactions" && method === "POST") {
       const body = await readJsonBody(request);
       const emoji = normalizeText(body.emoji);
-      if (!emoji) {
-      return json({ error: "이모지는 필수입니다" }, 400);
-      }
-      const existing = db.prepare("SELECT id FROM reactions WHERE idea_id = ? AND user_id = ? AND emoji = ?").get(ideaId, ctx.user.id, emoji);
+      const targetType = normalizeText(body.targetType) || "idea";
+      const targetId = normalizeText(body.targetId) || "";
+      if (!emoji) return json({ error: "이모지는 필수입니다" }, 400);
+      const existing = db
+        .prepare("SELECT id FROM reactions WHERE idea_id = ? AND user_id = ? AND emoji = ? AND target_type = ? AND target_id = ?")
+        .get(ideaId, ctx.user.id, emoji, targetType, targetId);
       if (existing) {
         db.prepare("DELETE FROM reactions WHERE id = ?").run(existing.id);
-        recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.removed", { emoji });
+        recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.removed", { emoji, targetType, targetId });
         return json({ toggled: false });
       }
-      db.prepare("INSERT INTO reactions (idea_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)").run(
-        ideaId,
-        ctx.user.id,
-        emoji,
-        Date.now()
+      db.prepare("INSERT INTO reactions (idea_id, user_id, emoji, target_type, target_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+        ideaId, ctx.user.id, emoji, targetType, targetId, Date.now()
       );
-      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.added", { emoji });
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.added", { emoji, targetType, targetId });
       return json({ toggled: true }, 201);
     }
 

@@ -368,28 +368,48 @@ export function IdeaStudioPanel({
                 <span>탭 전환 시 작성 내용 유지</span>
               </div>
 
-              <div className="mt-3 flex flex-wrap gap-0 border-b border-[var(--border)]">
-                <button
-                  type="button"
-                  className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "editor" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
-                  onClick={() => setStudioTab("editor")}
-                >
-                  <SquarePen className="h-4 w-4" /> 편집
-                </button>
-                <button
-                  type="button"
-                  className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "collab" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
-                  onClick={() => setStudioTab("collab")}
-                >
-                  <MessageSquareText className="h-4 w-4" /> 협업
-                </button>
-                <button
-                  type="button"
-                  className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "docs" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
-                  onClick={() => setStudioTab("docs")}
-                >
-                  <ScrollText className="h-4 w-4" /> 문서/타임라인
-                </button>
+              <div className="mt-3 flex items-center border-b border-[var(--border)]">
+                <div className="flex flex-1 flex-wrap gap-0">
+                  <button
+                    type="button"
+                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "editor" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
+                    onClick={() => setStudioTab("editor")}
+                  >
+                    <SquarePen className="h-4 w-4" /> 편집
+                  </button>
+                  <button
+                    type="button"
+                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "collab" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
+                    onClick={() => setStudioTab("collab")}
+                  >
+                    <MessageSquareText className="h-4 w-4" />
+                    협업
+                    {comments.length > 0 && (
+                      <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-semibold text-white">
+                        {comments.length}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "docs" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
+                    onClick={() => setStudioTab("docs")}
+                  >
+                    <ScrollText className="h-4 w-4" /> 문서/타임라인
+                  </button>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5 pb-1 pr-1">
+                  {teamMembers.slice(0, 3).map((member) => (
+                    <span
+                      key={member.userId}
+                      title={member.name}
+                      className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--foreground)] text-[10px] font-semibold text-[var(--surface)]"
+                    >
+                      {String(member.name || "?")[0].toUpperCase()}
+                    </span>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -397,6 +417,7 @@ export function IdeaStudioPanel({
               <BlockEditor
                 key={selectedIdea.id}
                 idea={selectedIdea}
+                comments={comments}
                 STATUS_META={STATUS_META}
                 formatTime={formatTime}
                 onSaveBlocks={async (editorBlocks) => {
@@ -413,6 +434,14 @@ export function IdeaStudioPanel({
                 }}
                 onSaveStatus={async (status) => {
                   await handleSaveIdea(null, { status });
+                }}
+                onOpenBlockComments={(blockId) => {
+                  setCommentBlockId(blockId);
+                  setCommentFilterBlockId(blockId);
+                  setStudioTab("collab");
+                }}
+                onBlockReaction={async (blockId, emoji) => {
+                  await handleReaction(emoji, "block", blockId);
                 }}
               />
             ) : null}
