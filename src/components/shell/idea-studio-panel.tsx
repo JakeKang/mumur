@@ -666,17 +666,46 @@ export function IdeaStudioPanel({
               </form>
               <div className="grid gap-2">
                 {versions.length ? (
-                  versions.map((version) => (
-                    <div key={version.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                      <p className="font-medium">{version.versionLabel}</p>
-                      <p className="text-sm">{version.notes || "(메모 없음)"}</p>
-                      {version.filePath ? (
-                        <a className="text-sm text-[var(--foreground)] underline" href={version.filePath} target="_blank" rel="noreferrer">
-                          {version.fileName}
-                        </a>
-                      ) : null}
-                    </div>
-                  ))
+                  versions.map((version) => {
+                    const isAuto = String(version.versionLabel).startsWith("auto-");
+                    return (
+                      <div key={version.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              {isAuto ? (
+                                <span className="rounded bg-[var(--surface-strong)] px-1 py-0.5 text-[10px] text-[var(--muted)]">자동</span>
+                              ) : (
+                                <span className="rounded bg-[var(--accent)]/10 px-1 py-0.5 text-[10px] text-[var(--accent)]">수동</span>
+                              )}
+                              <p className="truncate text-xs font-medium">{version.versionLabel}</p>
+                            </div>
+                            <p className="mt-0.5 text-xs text-[var(--muted)]">{version.creatorName} · {formatTime(version.createdAt)}</p>
+                          </div>
+                          {!isAuto && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                if (confirm(`"${version.versionLabel}" 버전으로 복원할까요? 현재 내용이 대체됩니다.`)) {
+                                  api(`/api/ideas/${selectedIdeaId}/versions/${version.id}/restore`, { method: "POST" })
+                                    .then(() => window.location.reload());
+                                }
+                              }}
+                            >
+                              복원
+                            </Button>
+                          )}
+                        </div>
+                        {version.filePath ? (
+                          <a className="mt-1 block text-xs text-[var(--foreground)] underline" href={version.filePath} target="_blank" rel="noreferrer">
+                            {version.fileName}
+                          </a>
+                        ) : null}
+                      </div>
+                    );
+                  })
                 ) : (
                   <p className="text-sm text-[var(--muted)]">버전 없음</p>
                 )}

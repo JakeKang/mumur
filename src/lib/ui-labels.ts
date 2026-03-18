@@ -12,7 +12,15 @@ export function priorityLabel(level: string) {
 }
 
 export function roleLabel(role: string) {
-  return role === "owner" ? "소유자" : "멤버";
+  const map: Record<string, string> = {
+    admin: "관리자",
+    owner: "관리자",
+    deleter: "편집+삭제",
+    editor: "편집자",
+    member: "편집자",
+    viewer: "보기 전용",
+  };
+  return map[role] ?? role;
 }
 
 export function invitationStatusLabel(status: string) {

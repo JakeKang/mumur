@@ -197,7 +197,7 @@ function run() {
   db.prepare("INSERT OR IGNORE INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
     workspace.id,
     userId,
-    "owner",
+    "admin",
     now
   );
 

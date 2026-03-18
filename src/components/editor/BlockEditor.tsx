@@ -241,6 +241,7 @@ function BlockRow({
 type BlockEditorProps = {
   idea: Idea;
   comments?: Comment[];
+  readOnly?: boolean;
   onSaveBlocks: (blocks: EditorBlockData[]) => Promise<void>;
   onSaveTitle: (title: string) => Promise<void>;
   onSaveStatus?: (status: IdeaStatus) => Promise<void>;
@@ -253,6 +254,7 @@ type BlockEditorProps = {
 export function BlockEditor({
   idea,
   comments = [],
+  readOnly = false,
   onSaveBlocks,
   onSaveTitle,
   onSaveStatus,
@@ -357,11 +359,19 @@ export function BlockEditor({
     <div className="flex h-full flex-col">
       <SaveStatusBadge status={status} onRetry={flush} />
 
+      {readOnly && (
+        <div className="flex items-center gap-2 border-b border-[var(--border)] bg-amber-50 px-4 py-2 text-xs text-amber-700">
+          <span>🔒</span>
+          <span>보기 전용 — 이 워크스페이스에서는 편집 권한이 없습니다.</span>
+        </div>
+      )}
+
       <div className="px-4 pb-4 pt-6 md:px-8 md:pt-8">
         <textarea
           className="w-full resize-none border-0 bg-transparent font-serif text-2xl font-bold leading-snug text-[var(--foreground)] outline-none placeholder:text-[var(--muted)] md:text-3xl"
           placeholder="제목 없음"
           value={title}
+          readOnly={readOnly}
           rows={1}
           onChange={(e) => {
             e.target.style.height = "auto";

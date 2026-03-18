@@ -24,15 +24,16 @@ const WEBHOOK_PLATFORMS = ["slack", "discord"];
 const TEAM_ROLES = ["owner", "member"];
 const encoder = new TextEncoder();
 
+type StreamClient = { controller: ReadableStreamDefaultController; userId: number };
 const globalRef = globalThis;
 if (!globalRef.__mumurStreamClients) {
-  globalRef.__mumurStreamClients = new Map();
+  globalRef.__mumurStreamClients = new Map<number, Map<string, StreamClient>>();
 }
 if (!globalRef.__mumurWebhookWorker) {
   globalRef.__mumurWebhookWorker = null;
 }
 
-const streamClients = globalRef.__mumurStreamClients;
+const streamClients: Map<number, Map<string, StreamClient>> = globalRef.__mumurStreamClients;
 
 function json(data, status = 200) {
   return NextResponse.json(data, { status });
@@ -230,6 +231,15 @@ function teamStreamSet(teamId) {
     streamClients.set(teamId, new Map());
   }
   return streamClients.get(teamId);
+}
+
+function broadcastPresenceEvent(teamId: number, event: { type: string; [key: string]: unknown }) {
+  const clients = streamClients.get(teamId);
+  if (!clients || !clients.size) return;
+  const line = `event: presence\ndata: ${JSON.stringify(event)}\n\n`;
+  clients.forEach((client) => {
+    try { client.controller.enqueue(encoder.encode(line)); } catch (e) { void e; }
+  });
 }
 
 function broadcastTeamNotification(teamId, notification) {
@@ -490,17 +500,31 @@ function authContext(request) {
   };
 }
 
+const ROLE_LEVEL: Record<string, number> = {
+  viewer: 0,
+  editor: 1,
+  deleter: 2,
+  admin: 3,
+  owner: 3,
+  member: 1,
+};
+
 function getTeamMembership(teamId, userId) {
   return db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(teamId, userId) || null;
 }
 
-function isTeamOwner(teamId, userId) {
+function hasMinRole(teamId: number, userId: number, minRole: string): boolean {
   const membership = getTeamMembership(teamId, userId);
-  return membership?.role === "owner";
+  if (!membership) return false;
+  return (ROLE_LEVEL[membership.role] ?? 0) >= (ROLE_LEVEL[minRole] ?? 99);
+}
+
+function isTeamOwner(teamId, userId) {
+  return hasMinRole(teamId, userId, "admin");
 }
 
 function ownerCount(teamId) {
-  return db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE team_id = ? AND role = 'owner'").get(teamId).count;
+  return db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE team_id = ? AND role IN ('owner','admin')").get(teamId).count;
 }
 
 function toInvitationPayload(row) {
@@ -1132,19 +1156,34 @@ async function handleRequest(request, slug, method) {
     if (!ideaStatuses.includes(status)) {
       return json({ error: "유효하지 않은 상태입니다" }, 400);
       }
+      const now = Date.now();
       db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, blocks_json = ?, updated_at = ? WHERE id = ?").run(
         title,
         category,
         status,
         JSON.stringify(blocks),
-        Date.now(),
+        now,
         ideaId
       );
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", { title, status, category });
+
+      const lastSnapshot = db.prepare(
+        "SELECT created_at FROM idea_versions WHERE idea_id = ? AND version_label LIKE 'auto-%' ORDER BY created_at DESC LIMIT 1"
+      ).get(ideaId) as { created_at: number } | undefined;
+      const snapshotInterval = 5 * 60 * 1000;
+      if (!lastSnapshot || now - lastSnapshot.created_at >= snapshotInterval) {
+        db.prepare(
+          "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
+        ).run(ideaId, `auto-${new Date(now).toISOString().slice(0, 16).replace("T", " ")}`, JSON.stringify(blocks), ctx.user.id, now);
+      }
+
       return json({ idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
     }
 
     if (s.length === 2 && method === "DELETE") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "deleter")) {
+        return json({ error: "삭제 권한이 없습니다" }, 403);
+      }
       db.prepare("DELETE FROM ideas WHERE id = ?").run(ideaId);
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.deleted", { title: idea.title });
       return json({ ok: true });
@@ -1331,6 +1370,27 @@ async function handleRequest(request, slug, method) {
         },
         201
       );
+    }
+
+    if (s[2] === "versions" && s[3] && s[4] === "restore" && method === "POST") {
+      const versionId = Number(s[3]);
+      const versionRow = db.prepare("SELECT * FROM idea_versions WHERE id = ? AND idea_id = ?").get(versionId, ideaId) as {
+        id: number; notes: string | null; version_label: string
+      } | undefined;
+      if (!versionRow) return json({ error: "버전을 찾을 수 없습니다" }, 404);
+      let restoredBlocks: unknown[] = [];
+      if (versionRow.notes) {
+        try { restoredBlocks = JSON.parse(versionRow.notes); } catch { restoredBlocks = []; }
+      }
+      const now = Date.now();
+      db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ?").run(
+        JSON.stringify(restoredBlocks), now, ideaId
+      );
+      db.prepare(
+        "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).run(ideaId, `복원-${versionRow.version_label}`, JSON.stringify(restoredBlocks), ctx.user.id, now);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.restored", { from: versionRow.version_label });
+      return json({ idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
     }
 
     if (s[2] === "summary" && method === "POST") {
@@ -1646,8 +1706,18 @@ async function handleRequest(request, slug, method) {
     let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
     const stream = new ReadableStream({
       start(controller) {
+        const userInfo = { userId: ctx.user.id, name: ctx.user.name };
         clients.set(clientId, { controller, userId: ctx.user.id });
-        controller.enqueue(encoder.encode(`event: connected\ndata: ${JSON.stringify({ ok: true, teamId })}\n\n`));
+        controller.enqueue(encoder.encode(`event: connected\ndata: ${JSON.stringify({ ok: true, teamId, user: userInfo })}\n\n`));
+
+        const onlineUsers = Array.from(clients.values()).map((c) => {
+          const u = db.prepare("SELECT id, name FROM users WHERE id = ?").get(c.userId) as { id: number; name: string } | undefined;
+          return u ? { userId: u.id, name: u.name } : null;
+        }).filter(Boolean);
+        controller.enqueue(encoder.encode(`event: presence\ndata: ${JSON.stringify({ type: "snapshot", users: onlineUsers })}\n\n`));
+
+        broadcastPresenceEvent(teamId, { type: "user.joined", ...userInfo });
+
         keepAliveTimer = setInterval(() => {
           try {
             controller.enqueue(encoder.encode(": ping\n\n"));
@@ -1661,6 +1731,7 @@ async function handleRequest(request, slug, method) {
           const teamClients = streamClients.get(teamId);
           if (teamClients) {
             teamClients.delete(clientId);
+            broadcastPresenceEvent(teamId, { type: "user.left", ...userInfo });
             if (!teamClients.size) {
               streamClients.delete(teamId);
             }

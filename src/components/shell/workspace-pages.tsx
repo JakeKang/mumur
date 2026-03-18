@@ -408,8 +408,10 @@ export function TeamSurface({
                 value={teamMemberForm.role}
                 onChange={(event) => setTeamMemberForm((prev) => ({ ...prev, role: event.target.value }))}
               >
-                <option value="member">멤버</option>
-                <option value="owner">소유자</option>
+                <option value="viewer">보기 전용</option>
+                <option value="editor">편집자</option>
+                <option value="deleter">편집+삭제</option>
+                <option value="admin">관리자</option>
               </select>
               <Button type="submit">+ 멤버 초대</Button>
             </form>
@@ -462,8 +464,10 @@ export function TeamSurface({
                       value={member.role}
                       onChange={(event) => updateTeamMemberRole(member.userId, event.target.value)}
                     >
-                      <option value="member">{roleLabel("member")}</option>
-                      <option value="owner">{roleLabel("owner")}</option>
+                      <option value="viewer">보기 전용</option>
+                      <option value="editor">편집자</option>
+                      <option value="deleter">편집+삭제</option>
+                      <option value="admin">관리자</option>
                     </select>
                     <Button size="sm" variant="outline" onClick={() => requestRemoveTeamMember(member)}>
                       제거

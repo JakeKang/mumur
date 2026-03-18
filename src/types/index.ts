@@ -174,7 +174,7 @@ export type TimelineEvent = {
 };
 
 
-export type WorkspaceRole = "owner" | "member";
+export type WorkspaceRole = "viewer" | "editor" | "deleter" | "admin" | "owner" | "member";
 
 export type WorkspaceMember = {
   userId: number;
