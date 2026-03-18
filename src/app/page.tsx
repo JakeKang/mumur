@@ -67,6 +67,7 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
   const [navCollapsed, setNavCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [createIdeaDialogOpen, setCreateIdeaDialogOpen] = useState(false);
 
   const [session, setSession] = useState(null);
@@ -1187,8 +1188,17 @@ export default function HomePage() {
           <div className="relative flex h-screen overflow-hidden bg-[var(--surface)]">
             <button
               type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="fixed left-3 top-3 z-40 flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)] shadow md:hidden"
+              aria-label="메뉴 열기"
+            >
+              ☰
+            </button>
+
+            <button
+              type="button"
               onClick={() => setNavCollapsed((prev) => !prev)}
-              className="fixed z-40 flex h-6 w-6 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--muted)] shadow"
+              className="fixed z-40 hidden h-6 w-6 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--muted)] shadow md:flex"
               style={{ top: 12, left: navCollapsed ? 42 : 226 }}
               aria-label={navCollapsed ? "사이드바 펼치기" : "사이드바 접기"}
               title={navCollapsed ? "사이드바 펼치기" : "사이드바 접기"}
@@ -1196,22 +1206,40 @@ export default function HomePage() {
               {navCollapsed ? "→" : "←"}
             </button>
 
-            <MumurNavigationSidebar
-              activePage={activePage}
-              onNavigate={handleNavigatePage}
-              collapsed={navCollapsed}
-              userName={session?.user?.name || "Mumur 사용자"}
-              workspaceName={session?.workspace?.name || "워크스페이스"}
-              userWorkspaces={userTeams}
-              activeWorkspaceId={session?.workspace?.id ?? null}
-              onSwitchWorkspace={handleSwitchTeam}
-              onCreateWorkspace={handleCreateWorkspace}
-              onUpdateWorkspace={handleUpdateWorkspace}
-              onDeleteWorkspace={handleDeleteWorkspace}
-            />
+            {mobileNavOpen && (
+              <button
+                type="button"
+                className="fixed inset-0 z-40 bg-black/40 md:hidden"
+                aria-label="메뉴 닫기"
+                onClick={() => setMobileNavOpen(false)}
+              />
+            )}
+
+            <div
+              className={`
+                md:relative md:block md:shrink-0
+                fixed inset-y-0 left-0 z-50 transition-transform duration-200
+                ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"}
+                md:translate-x-0
+              `}
+            >
+              <MumurNavigationSidebar
+                activePage={activePage}
+                onNavigate={(page) => { handleNavigatePage(page); setMobileNavOpen(false); }}
+                collapsed={navCollapsed}
+                userName={session?.user?.name || "Mumur 사용자"}
+                workspaceName={session?.workspace?.name || "워크스페이스"}
+                userWorkspaces={userTeams}
+                activeWorkspaceId={session?.workspace?.id ?? null}
+                onSwitchWorkspace={(id) => { handleSwitchTeam(id); setMobileNavOpen(false); }}
+                onCreateWorkspace={handleCreateWorkspace}
+                onUpdateWorkspace={handleUpdateWorkspace}
+                onDeleteWorkspace={handleDeleteWorkspace}
+              />
+            </div>
 
             <section className="flex-1 overflow-auto">
-              <div className="mx-auto w-full max-w-6xl px-6 py-7 md:px-10">
+              <div className="mx-auto w-full max-w-6xl px-4 pt-14 pb-7 md:px-10 md:pt-7">
                 <div className="mb-5 flex flex-wrap items-center gap-2">
                   <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`연결 ${streamStatusLabel(streamStatus)}`}</span>
                   <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`안읽음 ${unreadCount}`}</span>
