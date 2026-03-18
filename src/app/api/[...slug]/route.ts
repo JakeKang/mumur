@@ -69,7 +69,7 @@ function parseBlocks(inputBlocks) {
 function pickTeamForUser(userId) {
   return db
     .prepare(
-      "SELECT tm.team_id AS teamId, t.name AS teamName FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE tm.user_id = ? ORDER BY tm.created_at ASC LIMIT 1"
+      "SELECT tm.team_id AS teamId, t.name AS teamName FROM workspace_members tm JOIN workspaces t ON t.id = tm.team_id WHERE tm.user_id = ? ORDER BY tm.created_at ASC LIMIT 1"
     )
     .get(userId);
 }
@@ -158,7 +158,7 @@ function resolveMentionTargets(teamId, tokens) {
   const members = db
     .prepare(
       `SELECT u.id, u.name, u.email
-       FROM team_members tm
+       FROM workspace_members tm
        JOIN users u ON u.id = tm.user_id
        WHERE tm.team_id = ?`
     )
@@ -313,7 +313,7 @@ async function processWebhookQueue() {
     .prepare(
       `SELECT wd.*, tw.platform, tw.webhook_url, e.event_type, e.payload_json, e.user_id
        FROM webhook_deliveries wd
-       JOIN team_webhooks tw ON tw.id = wd.webhook_id
+       JOIN workspace_webhooks tw ON tw.id = wd.webhook_id
        JOIN events e ON e.id = wd.event_id
        WHERE wd.status IN ('pending', 'retry') AND wd.next_attempt_at <= ? AND tw.enabled = 1
        ORDER BY wd.next_attempt_at ASC
@@ -368,7 +368,7 @@ function ensureWebhookWorker() {
 }
 
 function enqueueWebhookDeliveries(teamId, eventId) {
-  const hooks = db.prepare("SELECT * FROM team_webhooks WHERE team_id = ? AND enabled = 1 ORDER BY id ASC").all(teamId);
+  const hooks = db.prepare("SELECT * FROM workspace_webhooks WHERE team_id = ? AND enabled = 1 ORDER BY id ASC").all(teamId);
   if (!hooks.length) {
     return;
   }
@@ -491,7 +491,7 @@ function authContext(request) {
 }
 
 function getTeamMembership(teamId, userId) {
-  return db.prepare("SELECT role FROM team_members WHERE team_id = ? AND user_id = ?").get(teamId, userId) || null;
+  return db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(teamId, userId) || null;
 }
 
 function isTeamOwner(teamId, userId) {
@@ -500,7 +500,7 @@ function isTeamOwner(teamId, userId) {
 }
 
 function ownerCount(teamId) {
-  return db.prepare("SELECT COUNT(*) AS count FROM team_members WHERE team_id = ? AND role = 'owner'").get(teamId).count;
+  return db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE team_id = ? AND role = 'owner'").get(teamId).count;
 }
 
 function toInvitationPayload(row) {
@@ -582,15 +582,15 @@ async function handleRequest(request, slug, method) {
         .prepare("INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
         .run(name, email, passwordHash, now);
       const userId = Number(userResult.lastInsertRowid);
-      const teamResult = db.prepare("INSERT INTO teams (name, owner_id, created_at) VALUES (?, ?, ?)").run(teamName, userId, now);
+      const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, userId, now, now);
       const teamId = Number(teamResult.lastInsertRowid);
-      db.prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, userId, "owner", now);
-      recordTeamEvent(teamId, null, userId, "team.created", { teamName });
+      db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, userId, "owner", now);
+      recordTeamEvent(teamId, null, userId, "workspace.created", { teamName });
       return { userId, teamId };
     })();
 
     const session = createSession(db, created.userId, created.teamId);
-    const response = json({ user: { id: created.userId, name, email }, team: { id: created.teamId, name: teamName } }, 201);
+    const response = json({ user: { id: created.userId, name, email }, workspace: { id: created.teamId, name: teamName } }, 201);
     return withSessionCookie(response, session.token, session.expiresAt);
   }
 
@@ -612,7 +612,7 @@ async function handleRequest(request, slug, method) {
     const session = createSession(db, user.id, team.teamId);
     const response = json({
       user: { id: user.id, name: user.name, email: user.email },
-      team: { id: team.teamId, name: team.teamName }
+      workspace: { id: team.teamId, name: team.teamName }
     });
     return withSessionCookie(response, session.token, session.expiresAt);
   }
@@ -631,26 +631,26 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "auth" && s[1] === "me" && method === "GET") {
-    const team = db
+    const workspace = db
       .prepare(
-        `SELECT t.id, t.name, t.owner_id,
+        `SELECT t.id, t.name, t.owner_id, t.icon, t.color,
                 tm.role AS my_role
-         FROM teams t
-         LEFT JOIN team_members tm ON tm.team_id = t.id AND tm.user_id = ?
+         FROM workspaces t
+         LEFT JOIN workspace_members tm ON tm.team_id = t.id AND tm.user_id = ?
          WHERE t.id = ?`
       )
       .get(ctx.user.id, ctx.session.teamId);
-    return json({ user: ctx.user, team });
+    return json({ user: ctx.user, workspace });
   }
 
-  if (s[0] === "teams" && s.length === 1 && method === "GET") {
-    const teams = db
+  if (s[0] === "workspaces" && s.length === 1 && method === "GET") {
+     const workspaces = db
       .prepare(
-        `SELECT t.id, t.name, t.owner_id,
+        `SELECT t.id, t.name, t.owner_id, t.icon, t.color,
                 tm.role,
                 tm.created_at
-         FROM team_members tm
-         JOIN teams t ON t.id = tm.team_id
+         FROM workspace_members tm
+         JOIN workspaces t ON t.id = tm.team_id
          WHERE tm.user_id = ?
          ORDER BY tm.created_at ASC`
       )
@@ -658,50 +658,52 @@ async function handleRequest(request, slug, method) {
       .map((row) => ({
         id: row.id,
         name: row.name,
+        icon: row.icon,
+        color: row.color,
         ownerId: row.owner_id,
         role: row.role,
         joinedAt: row.created_at,
         active: row.id === ctx.session.teamId
       }));
-    return json({ teams });
+    return json({ workspaces });
   }
 
-  if (s[0] === "teams" && s.length === 1 && method === "POST") {
+  if (s[0] === "workspaces" && s.length === 1 && method === "POST") {
     const body = await readJsonBody(request);
     const teamName = normalizeText(body.teamName);
     if (!teamName) {
       return json({ error: "팀 이름은 필수입니다" }, 400);
     }
     const now = Date.now();
-    const teamResult = db.prepare("INSERT INTO teams (name, owner_id, created_at) VALUES (?, ?, ?)").run(teamName, ctx.user.id, now);
+    const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, ctx.user.id, now, now);
     const teamId = Number(teamResult.lastInsertRowid);
-    db.prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, ctx.user.id, "owner", now);
+    db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, ctx.user.id, "owner", now);
     db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(teamId, ctx.session.id);
-    recordTeamEvent(teamId, null, ctx.user.id, "team.created", { teamName });
-    return json({ team: { id: teamId, name: teamName } }, 201);
+    recordTeamEvent(teamId, null, ctx.user.id, "workspace.created", { teamName });
+    return json({ workspace: { id: teamId, name: teamName } }, 201);
   }
 
-  if (s[0] === "teams" && s[1] === "switch" && method === "POST") {
+  if (s[0] === "workspaces" && s[1] === "switch" && method === "POST") {
     const body = await readJsonBody(request);
     const teamId = Number(body.teamId);
     if (!Number.isInteger(teamId) || teamId <= 0) {
       return json({ error: "유효하지 않은 팀 ID입니다" }, 400);
     }
-    const membership = db.prepare("SELECT role FROM team_members WHERE team_id = ? AND user_id = ?").get(teamId, ctx.user.id);
+    const membership = db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(teamId, ctx.user.id);
     if (!membership) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(teamId, ctx.session.id);
-    const team = db.prepare("SELECT id, name, owner_id FROM teams WHERE id = ?").get(teamId);
-    return json({ team: { id: team.id, name: team.name, ownerId: team.owner_id, role: membership.role } });
+    const team = db.prepare("SELECT id, name, owner_id FROM workspaces WHERE id = ?").get(teamId);
+    return json({ workspace: { id: team.id, name: team.name, ownerId: team.owner_id, role: membership.role } });
   }
 
-  if (s[0] === "team" && s[1] === "members" && s.length === 2 && method === "GET") {
+  if (s[0] === "workspace" && s[1] === "members" && s.length === 2 && method === "GET") {
     const members = db
       .prepare(
         `SELECT tm.team_id, tm.user_id, tm.role, tm.created_at,
                 u.name, u.email
-         FROM team_members tm
+         FROM workspace_members tm
          JOIN users u ON u.id = tm.user_id
          WHERE tm.team_id = ?
          ORDER BY CASE WHEN tm.role = 'owner' THEN 0 ELSE 1 END, tm.created_at ASC`
@@ -726,7 +728,7 @@ async function handleRequest(request, slug, method) {
     });
   }
 
-  if (s[0] === "team" && s[1] === "members" && s.length === 2 && method === "POST") {
+  if (s[0] === "workspace" && s[1] === "members" && s.length === 2 && method === "POST") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
@@ -743,11 +745,11 @@ async function handleRequest(request, slug, method) {
     if (!user) {
       return json({ error: "사용자를 찾을 수 없습니다" }, 404);
     }
-    const existing = db.prepare("SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
+    const existing = db.prepare("SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
     if (existing) {
       return json({ error: "이미 팀에 속한 사용자입니다" }, 409);
     }
-    db.prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
+    db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
       ctx.session.teamId,
       user.id,
       role,
@@ -766,12 +768,12 @@ async function handleRequest(request, slug, method) {
     }, 201);
   }
 
-  if (s[0] === "team" && s[1] === "members" && s[2] && method === "PUT") {
+  if (s[0] === "workspace" && s[1] === "members" && s[2] && method === "PUT") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const targetUserId = Number(s[2]);
-    const target = db.prepare("SELECT user_id, role FROM team_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, targetUserId);
+    const target = db.prepare("SELECT user_id, role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, targetUserId);
     if (!target) {
       return json({ error: "멤버를 찾을 수 없습니다" }, 404);
     }
@@ -783,17 +785,17 @@ async function handleRequest(request, slug, method) {
     if (target.role === "owner" && nextRole !== "owner" && ownerCount(ctx.session.teamId) <= 1) {
       return json({ error: "팀에는 최소 1명의 소유자가 필요합니다" }, 400);
     }
-    db.prepare("UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?").run(nextRole, ctx.session.teamId, targetUserId);
+    db.prepare("UPDATE workspace_members SET role = ? WHERE team_id = ? AND user_id = ?").run(nextRole, ctx.session.teamId, targetUserId);
     recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.member.role.updated", { targetUserId, role: nextRole });
     return json({ ok: true });
   }
 
-  if (s[0] === "team" && s[1] === "members" && s[2] && method === "DELETE") {
+  if (s[0] === "workspace" && s[1] === "members" && s[2] && method === "DELETE") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const targetUserId = Number(s[2]);
-    const target = db.prepare("SELECT user_id, role FROM team_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, targetUserId);
+    const target = db.prepare("SELECT user_id, role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, targetUserId);
     if (!target) {
       return json({ error: "멤버를 찾을 수 없습니다" }, 404);
     }
@@ -803,16 +805,16 @@ async function handleRequest(request, slug, method) {
     if (target.role === "owner" && ownerCount(ctx.session.teamId) <= 1) {
       return json({ error: "팀에는 최소 1명의 소유자가 필요합니다" }, 400);
     }
-    db.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").run(ctx.session.teamId, targetUserId);
+    db.prepare("DELETE FROM workspace_members WHERE team_id = ? AND user_id = ?").run(ctx.session.teamId, targetUserId);
     recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.member.removed", { targetUserId });
     return json({ ok: true });
   }
 
-  if (s[0] === "team" && s[1] === "invitations" && s.length === 2 && method === "GET") {
+  if (s[0] === "workspace" && s[1] === "invitations" && s.length === 2 && method === "GET") {
     const rows = db
       .prepare(
         `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
-         FROM team_invitations i
+         FROM workspace_invitations i
          JOIN users inviter ON inviter.id = i.invited_by
          LEFT JOIN users resolver ON resolver.id = i.resolved_by
          WHERE i.team_id = ?
@@ -822,7 +824,7 @@ async function handleRequest(request, slug, method) {
     return json({ invitations: rows.map(toInvitationPayload) });
   }
 
-  if (s[0] === "team" && s[1] === "invitations" && s.length === 2 && method === "POST") {
+  if (s[0] === "workspace" && s[1] === "invitations" && s.length === 2 && method === "POST") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
@@ -843,13 +845,13 @@ async function handleRequest(request, slug, method) {
     let resolvedBy = null;
 
     if (user) {
-      const existingMember = db.prepare("SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
+      const existingMember = db.prepare("SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
       if (existingMember) {
         status = "accepted";
         message = "이미 팀 멤버입니다.";
         resolvedBy = ctx.user.id;
       } else {
-        db.prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
+        db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
           ctx.session.teamId,
           user.id,
           role,
@@ -863,21 +865,21 @@ async function handleRequest(request, slug, method) {
     }
 
     const now = Date.now();
-    const existingInvite = db.prepare("SELECT id FROM team_invitations WHERE team_id = ? AND email = ?").get(ctx.session.teamId, email);
+    const existingInvite = db.prepare("SELECT id FROM workspace_invitations WHERE team_id = ? AND email = ?").get(ctx.session.teamId, email);
     if (existingInvite) {
       db.prepare(
-        "UPDATE team_invitations SET role = ?, status = ?, message = ?, invited_by = ?, resolved_by = ?, updated_at = ? WHERE id = ?"
+        "UPDATE workspace_invitations SET role = ?, status = ?, message = ?, invited_by = ?, resolved_by = ?, updated_at = ? WHERE id = ?"
       ).run(role, status, message, ctx.user.id, resolvedBy, now, existingInvite.id);
     } else {
       db.prepare(
-        "INSERT INTO team_invitations (team_id, email, role, status, message, invited_by, resolved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO workspace_invitations (team_id, email, role, status, message, invited_by, resolved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       ).run(ctx.session.teamId, email, role, status, message, ctx.user.id, resolvedBy, now, now);
     }
 
     const invitation = db
       .prepare(
         `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
-         FROM team_invitations i
+         FROM workspace_invitations i
          JOIN users inviter ON inviter.id = i.invited_by
          LEFT JOIN users resolver ON resolver.id = i.resolved_by
          WHERE i.team_id = ? AND i.email = ?`
@@ -887,13 +889,13 @@ async function handleRequest(request, slug, method) {
     return json({ invitation: toInvitationPayload(invitation) }, 201);
   }
 
-  if (s[0] === "team" && s[1] === "invitations" && s[2] && s[3] === "retry" && method === "POST") {
+  if (s[0] === "workspace" && s[1] === "invitations" && s[2] && s[3] === "retry" && method === "POST") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const invitationId = Number(s[2]);
     const invitation = db
-      .prepare("SELECT * FROM team_invitations WHERE id = ? AND team_id = ?")
+      .prepare("SELECT * FROM workspace_invitations WHERE id = ? AND team_id = ?")
       .get(invitationId, ctx.session.teamId);
     if (!invitation) {
       return json({ error: "초대 정보를 찾을 수 없습니다" }, 404);
@@ -908,9 +910,9 @@ async function handleRequest(request, slug, method) {
     let resolvedBy = null;
 
     if (user) {
-      const existingMember = db.prepare("SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
+      const existingMember = db.prepare("SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
       if (!existingMember) {
-        db.prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
+        db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
           ctx.session.teamId,
           user.id,
           invitation.role,
@@ -925,7 +927,7 @@ async function handleRequest(request, slug, method) {
       resolvedBy = ctx.user.id;
     }
 
-    db.prepare("UPDATE team_invitations SET status = ?, message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+    db.prepare("UPDATE workspace_invitations SET status = ?, message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
       status,
       message,
       resolvedBy,
@@ -936,7 +938,7 @@ async function handleRequest(request, slug, method) {
     const updated = db
       .prepare(
         `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
-         FROM team_invitations i
+         FROM workspace_invitations i
          JOIN users inviter ON inviter.id = i.invited_by
          LEFT JOIN users resolver ON resolver.id = i.resolved_by
          WHERE i.id = ?`
@@ -945,18 +947,18 @@ async function handleRequest(request, slug, method) {
     return json({ invitation: toInvitationPayload(updated) });
   }
 
-  if (s[0] === "team" && s[1] === "invitations" && s[2] && method === "DELETE") {
+  if (s[0] === "workspace" && s[1] === "invitations" && s[2] && method === "DELETE") {
     if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const invitationId = Number(s[2]);
     const invitation = db
-      .prepare("SELECT id FROM team_invitations WHERE id = ? AND team_id = ?")
+      .prepare("SELECT id FROM workspace_invitations WHERE id = ? AND team_id = ?")
       .get(invitationId, ctx.session.teamId);
     if (!invitation) {
       return json({ error: "초대 정보를 찾을 수 없습니다" }, 404);
     }
-    db.prepare("UPDATE team_invitations SET status = 'cancelled', updated_at = ? WHERE id = ?").run(Date.now(), invitationId);
+    db.prepare("UPDATE workspace_invitations SET status = 'cancelled', updated_at = ? WHERE id = ?").run(Date.now(), invitationId);
     return json({ ok: true });
   }
 
@@ -1685,7 +1687,7 @@ async function handleRequest(request, slug, method) {
   if (s[0] === "integrations" && s[1] === "webhooks" && s.length === 2 && method === "GET") {
     const webhooks = db
       .prepare(
-        "SELECT id, team_id, platform, webhook_url, enabled, created_by, created_at, updated_at FROM team_webhooks WHERE team_id = ? ORDER BY platform ASC"
+        "SELECT id, team_id, platform, webhook_url, enabled, created_by, created_at, updated_at FROM workspace_webhooks WHERE team_id = ? ORDER BY platform ASC"
       )
       .all(ctx.session.teamId)
       .map((row) => ({
@@ -1707,7 +1709,7 @@ async function handleRequest(request, slug, method) {
       .prepare(
         `SELECT wd.*, tw.platform
          FROM webhook_deliveries wd
-         JOIN team_webhooks tw ON tw.id = wd.webhook_id
+         JOIN workspace_webhooks tw ON tw.id = wd.webhook_id
          WHERE tw.team_id = ?
          ORDER BY wd.updated_at DESC
          LIMIT 50`
@@ -1747,9 +1749,9 @@ async function handleRequest(request, slug, method) {
     }
 
     const now = Date.now();
-    const existing = db.prepare("SELECT id FROM team_webhooks WHERE team_id = ? AND platform = ?").get(ctx.session.teamId, platform);
+    const existing = db.prepare("SELECT id FROM workspace_webhooks WHERE team_id = ? AND platform = ?").get(ctx.session.teamId, platform);
     if (existing) {
-      db.prepare("UPDATE team_webhooks SET webhook_url = ?, enabled = ?, updated_at = ? WHERE id = ?").run(
+      db.prepare("UPDATE workspace_webhooks SET webhook_url = ?, enabled = ?, updated_at = ? WHERE id = ?").run(
         webhookUrl,
         enabled ? 1 : 0,
         now,
@@ -1757,12 +1759,12 @@ async function handleRequest(request, slug, method) {
       );
     } else {
       db.prepare(
-        "INSERT INTO team_webhooks (team_id, platform, webhook_url, enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO workspace_webhooks (team_id, platform, webhook_url, enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run(ctx.session.teamId, platform, webhookUrl, enabled ? 1 : 0, ctx.user.id, now, now);
     }
 
     recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "integration.webhook.updated", { platform, enabled });
-    const webhook = db.prepare("SELECT * FROM team_webhooks WHERE team_id = ? AND platform = ?").get(ctx.session.teamId, platform);
+    const webhook = db.prepare("SELECT * FROM workspace_webhooks WHERE team_id = ? AND platform = ?").get(ctx.session.teamId, platform);
     return json({
       webhook: {
         id: webhook.id,
@@ -1777,17 +1779,17 @@ async function handleRequest(request, slug, method) {
     });
   }
 
-  if (s[0] === "team" && s[1] === "views" && s.length === 2 && method === "GET") {
+  if (s[0] === "workspace" && s[1] === "views" && s.length === 2 && method === "GET") {
     const rows = db
       .prepare(
         `SELECT v.id, v.team_id, v.name, v.config_json, v.created_by, v.updated_by, v.created_at, v.updated_at,
                 u.name AS creator_name,
                 uu.name AS updater_name,
                 t.owner_id
-         FROM team_navigator_views v
+         FROM workspace_views v
          JOIN users u ON u.id = v.created_by
          LEFT JOIN users uu ON uu.id = COALESCE(v.updated_by, v.created_by)
-         JOIN teams t ON t.id = v.team_id
+         JOIN workspaces t ON t.id = v.team_id
          WHERE v.team_id = ?
          ORDER BY v.updated_at DESC`
       )
@@ -1818,7 +1820,7 @@ async function handleRequest(request, slug, method) {
     });
   }
 
-  if (s[0] === "team" && s[1] === "views" && s.length === 2 && method === "POST") {
+  if (s[0] === "workspace" && s[1] === "views" && s.length === 2 && method === "POST") {
     const body = await readJsonBody(request);
     const name = normalizeText(body.name);
     if (!name) {
@@ -1826,9 +1828,9 @@ async function handleRequest(request, slug, method) {
     }
     const config = typeof body.config === "object" && body.config ? body.config : {};
     const now = Date.now();
-    const existing = db.prepare("SELECT id FROM team_navigator_views WHERE team_id = ? AND name = ?").get(ctx.session.teamId, name);
+    const existing = db.prepare("SELECT id FROM workspace_views WHERE team_id = ? AND name = ?").get(ctx.session.teamId, name);
     if (existing) {
-      db.prepare("UPDATE team_navigator_views SET config_json = ?, updated_at = ?, updated_by = ? WHERE id = ?").run(
+      db.prepare("UPDATE workspace_views SET config_json = ?, updated_at = ?, updated_by = ? WHERE id = ?").run(
         JSON.stringify(config),
         now,
         ctx.user.id,
@@ -1836,7 +1838,7 @@ async function handleRequest(request, slug, method) {
       );
     } else {
       db.prepare(
-        "INSERT INTO team_navigator_views (team_id, name, config_json, created_by, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO workspace_views (team_id, name, config_json, created_by, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run(ctx.session.teamId, name, JSON.stringify(config), ctx.user.id, ctx.user.id, now, now);
     }
     const view = db
@@ -1845,10 +1847,10 @@ async function handleRequest(request, slug, method) {
                 u.name AS creator_name,
                 uu.name AS updater_name,
                 t.owner_id
-         FROM team_navigator_views v
+         FROM workspace_views v
          JOIN users u ON u.id = v.created_by
          LEFT JOIN users uu ON uu.id = COALESCE(v.updated_by, v.created_by)
-         JOIN teams t ON t.id = v.team_id
+         JOIN workspaces t ON t.id = v.team_id
          WHERE v.team_id = ? AND v.name = ?`
       )
       .get(ctx.session.teamId, name);
@@ -1869,13 +1871,13 @@ async function handleRequest(request, slug, method) {
     });
   }
 
-  if (s[0] === "team" && s[1] === "views" && s[2] && method === "DELETE") {
+  if (s[0] === "workspace" && s[1] === "views" && s[2] && method === "DELETE") {
     const viewId = Number(s[2]);
     const row = db
       .prepare(
         `SELECT v.id, v.created_by, t.owner_id
-         FROM team_navigator_views v
-         JOIN teams t ON t.id = v.team_id
+         FROM workspace_views v
+         JOIN workspaces t ON t.id = v.team_id
          WHERE v.id = ? AND v.team_id = ?`
       )
       .get(viewId, ctx.session.teamId);
@@ -1885,7 +1887,7 @@ async function handleRequest(request, slug, method) {
     if (row.created_by !== ctx.user.id && row.owner_id !== ctx.user.id) {
       return json({ error: "권한이 없습니다" }, 403);
     }
-    db.prepare("DELETE FROM team_navigator_views WHERE id = ?").run(viewId);
+    db.prepare("DELETE FROM workspace_views WHERE id = ?").run(viewId);
     return json({ ok: true });
   }
 

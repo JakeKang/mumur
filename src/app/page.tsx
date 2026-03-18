@@ -334,18 +334,18 @@ export default function HomePage() {
   }, []);
 
   const loadTeamMembers = useCallback(async () => {
-    const data = await api("/api/team/members");
+    const data = await api("/api/workspace/members");
     setTeamMembers(data.members || []);
     setTeamMe(data.me || { userId: null, isOwner: false });
   }, []);
 
   const loadUserTeams = useCallback(async () => {
-    const data = await api("/api/teams");
-    setUserTeams(data.teams || []);
+    const data = await api("/api/workspaces");
+    setUserTeams(data.workspaces || []);
   }, []);
 
   const loadTeamInvitations = useCallback(async () => {
-    const data = await api("/api/team/invitations");
+    const data = await api("/api/workspace/invitations");
     setTeamInvitations(data.invitations || []);
   }, []);
 
@@ -355,7 +355,7 @@ export default function HomePage() {
       email: teamMemberForm.email,
       role: teamMemberForm.role
     };
-    const data = await api("/api/team/invitations", {
+    const data = await api("/api/workspace/invitations", {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -365,7 +365,7 @@ export default function HomePage() {
   }, [loadTeamInvitations, loadTeamMembers, teamMemberForm]);
 
   const updateTeamMemberRole = useCallback(async (userId, role) => {
-    await api(`/api/team/members/${userId}`, {
+    await api(`/api/workspace/members/${userId}`, {
       method: "PUT",
       body: JSON.stringify({ role })
     });
@@ -373,18 +373,18 @@ export default function HomePage() {
   }, [loadTeamMembers]);
 
   const removeTeamMember = useCallback(async (userId) => {
-    await api(`/api/team/members/${userId}`, { method: "DELETE" });
+    await api(`/api/workspace/members/${userId}`, { method: "DELETE" });
     await loadTeamMembers();
   }, [loadTeamMembers]);
 
   const retryTeamInvitation = useCallback(async (invitationId) => {
-    const data = await api(`/api/team/invitations/${invitationId}/retry`, { method: "POST" });
+    const data = await api(`/api/workspace/invitations/${invitationId}/retry`, { method: "POST" });
     setTeamInvitationMessage(data.invitation?.message || "재시도 완료");
     await Promise.all([loadTeamMembers(), loadTeamInvitations()]);
   }, [loadTeamInvitations, loadTeamMembers]);
 
   const cancelTeamInvitation = useCallback(async (invitationId) => {
-    await api(`/api/team/invitations/${invitationId}`, { method: "DELETE" });
+    await api(`/api/workspace/invitations/${invitationId}`, { method: "DELETE" });
     await loadTeamInvitations();
   }, [loadTeamInvitations]);
 
@@ -1063,12 +1063,12 @@ export default function HomePage() {
   };
 
   const handleSwitchTeam = async (teamId) => {
-    if (!teamId || Number(teamId) === Number(session?.team?.id)) {
+    if (!teamId || Number(teamId) === Number(session?.workspace?.id)) {
       return;
     }
     setBusy(true);
     try {
-      await api("/api/teams/switch", {
+      await api("/api/workspaces/switch", {
         method: "POST",
         body: JSON.stringify({ teamId })
       });
@@ -1175,7 +1175,7 @@ export default function HomePage() {
               collapsed={navCollapsed}
               categories={categoryOptions}
               userName={session?.user?.name || "Mumur 사용자"}
-              teamName={session?.team?.name || "팀"}
+              teamName={session?.workspace?.name || "팀"}
             />
 
             <section className="flex-1 overflow-auto">
@@ -1183,7 +1183,7 @@ export default function HomePage() {
                 <div className="mb-5 flex flex-wrap items-center gap-2">
                   <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`연결 ${streamStatusLabel(streamStatus)}`}</span>
                   <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`안읽음 ${unreadCount}`}</span>
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{session?.team?.name || "팀"}</span>
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{session?.workspace?.name || "팀"}</span>
                   <div className="ml-auto flex flex-wrap items-center gap-2">
                     <button
                       type="button"
@@ -1381,7 +1381,7 @@ export default function HomePage() {
                   deliveries={deliveries}
                   teamMembers={teamMembers}
                   userTeams={userTeams}
-                  activeTeamId={session?.team?.id || null}
+                  activeTeamId={session?.workspace?.id || null}
                   teamMe={teamMe}
                   onSwitchTeam={handleSwitchTeam}
                   teamInvitations={teamInvitations}

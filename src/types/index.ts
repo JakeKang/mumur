@@ -20,15 +20,17 @@ export type SessionUser = {
   email: string;
 };
 
-export type SessionTeam = {
+export type SessionWorkspace = {
   id: number;
   name: string;
 };
 
 export type Session = {
   user: SessionUser;
-  team: SessionTeam;
+  workspace: SessionWorkspace;
 } | null;
+
+export type SessionTeam = SessionWorkspace;
 
 
 export type IdeaStatus = "seed" | "sprout" | "grow" | "harvest" | "rest";
@@ -42,6 +44,7 @@ export type Block = {
 
 export type Idea = {
   id: number;
+  workspaceId: number;
   teamId: number;
   authorId: number;
   title: string;
@@ -76,6 +79,7 @@ export type ThreadStatus = "active" | "resolved" | "on_hold";
 export type Thread = {
   id: number;
   ideaId: number;
+  workspaceId: number;
   teamId: number;
   createdBy: number;
   title: string;
@@ -138,6 +142,8 @@ export type Reaction = {
   ideaId: number;
   userId: number;
   emoji: string;
+  targetType: string;
+  targetId: string | null;
   createdAt: number;
   userName?: string;
 };
@@ -157,6 +163,7 @@ export type IdeaVersion = {
 
 export type TimelineEvent = {
   id: number;
+  workspaceId: number;
   teamId: number;
   ideaId: number | null;
   userId: number | null;
@@ -167,22 +174,22 @@ export type TimelineEvent = {
 };
 
 
-export type TeamRole = "owner" | "member";
+export type WorkspaceRole = "owner" | "member";
 
-export type TeamMember = {
+export type WorkspaceMember = {
   userId: number;
-  teamId: number;
+  workspaceId: number;
   name: string;
   email: string;
-  role: TeamRole;
+  role: WorkspaceRole;
   createdAt: number;
 };
 
-export type TeamInvitation = {
+export type WorkspaceInvitation = {
   id: number;
-  teamId: number;
+  workspaceId: number;
   email: string;
-  role: TeamRole;
+  role: WorkspaceRole;
   status: "pending" | "accepted" | "canceled";
   message: string | null;
   invitedBy: number;
@@ -191,21 +198,40 @@ export type TeamInvitation = {
   updatedAt: number;
 };
 
-export type TeamMe = {
+export type WorkspaceMe = {
   userId: number | null;
   isOwner: boolean;
 };
 
-export type UserTeam = {
+export type UserWorkspace = {
   id: number;
   name: string;
+  icon: string;
+  color: string;
   active?: boolean;
 };
 
-export type TeamMemberForm = {
+export type WorkspaceMemberForm = {
   email: string;
-  role: TeamRole;
+  role: WorkspaceRole;
 };
+
+export type Workspace = {
+  id: number;
+  name: string;
+  icon: string;
+  color: string;
+  ownerId: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TeamRole = WorkspaceRole;
+export type TeamMember = WorkspaceMember;
+export type TeamInvitation = WorkspaceInvitation;
+export type TeamMe = WorkspaceMe;
+export type UserTeam = UserWorkspace;
+export type TeamMemberForm = WorkspaceMemberForm;
 
 
 export type Notification = {
@@ -228,6 +254,7 @@ export type WebhookPlatform = "slack" | "discord";
 
 export type Webhook = {
   id: number;
+  workspaceId: number;
   teamId: number;
   platform: WebhookPlatform;
   webhookUrl: string;
