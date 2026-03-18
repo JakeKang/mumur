@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
-import { BlockActionsMenu } from "@/components/shell/block-actions-menu";
 import { MentionAssistPanel } from "@/components/shell/mention-assist-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { ThreadWorkflowDrawer } from "@/components/shell/thread-workflow-drawer";
 import { categoryLabel, timelineEventLabel } from "@/lib/ui-labels";
 import { ArrowLeft, Lightbulb, MessageSquareText, ScrollText, SquarePen } from "lucide-react";
+import { BlockActionsMenu } from "@/components/shell/block-actions-menu";
+import { Input } from "@/components/ui/input";
+import { BlockEditor } from "@/components/editor/BlockEditor";
 
 export function IdeaStudioPanel({
   selectedIdea,
@@ -393,112 +394,27 @@ export function IdeaStudioPanel({
             </div>
 
             {studioTab === "editor" ? (
-              <>
-            <form className="grid gap-2" onSubmit={handleSaveIdea}>
-              <Input
-                value={selectedIdea.title}
-                onChange={(event) => updateSelectedIdeaField("title", event.target.value)}
-                required
+              <BlockEditor
+                key={selectedIdea.id}
+                idea={selectedIdea}
+                STATUS_META={STATUS_META}
+                formatTime={formatTime}
+                onSaveBlocks={async (editorBlocks) => {
+                  const blocks = editorBlocks.map((b) => ({
+                    id: b.id,
+                    type: b.type,
+                    content: b.content,
+                    checked: b.checked ?? false,
+                  }));
+                  await handleSaveIdea(null, { blocks });
+                }}
+                onSaveTitle={async (title) => {
+                  await handleSaveIdea(null, { title });
+                }}
+                onSaveStatus={async (status) => {
+                  await handleSaveIdea(null, { status });
+                }}
               />
-              <Input
-                value={selectedIdea.category}
-                onChange={(event) => updateSelectedIdeaField("category", event.target.value)}
-              />
-              <select
-                className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
-                value={selectedIdea.status}
-                onChange={(event) => updateSelectedIdeaField("status", event.target.value)}
-              >
-                {IDEA_STATUS.map((status) => (
-                  <option key={status} value={status}>
-                    {`${STATUS_META[status].icon} ${STATUS_META[status].label}`}
-                  </option>
-                ))}
-              </select>
-              <Button type="submit" disabled={busy}>
-                아이디어 저장
-              </Button>
-            </form>
-
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <div className="flex items-center justify-between">
-                <p className="font-medium">블록 에디터</p>
-                <Button variant="outline" onClick={addBlock}>
-                  + 블록
-                </Button>
-              </div>
-              <div className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted)]">슬래시 팔레트</p>
-                <div className="flex flex-wrap gap-2">
-                  {BLOCK_TYPES.map((type) => (
-                    <Button key={`palette-${type}`} type="button" variant="outline" size="sm" onClick={() => addBlock(type)}>
-                      {`/${type}`}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid gap-2">
-                {blocks.map((block, index) => (
-                  <div key={block.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <select
-                        className="h-9 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-sm"
-                        value={block.type}
-                        onChange={(event) => updateBlock(index, { type: event.target.value })}
-                      >
-                        {BLOCK_TYPES.map((type) => (
-                          <option key={type} value={type}>
-                            {type}
-                          </option>
-                        ))}
-                      </select>
-                      {block.type === "checklist" ? (
-                        <label className="text-sm text-[var(--muted)]">
-                          <input
-                            type="checkbox"
-                            className="mr-1"
-                            checked={Boolean(block.checked)}
-                            onChange={(event) => updateBlock(index, { checked: event.target.checked })}
-                          />
-                          완료
-                        </label>
-                      ) : null}
-                      <BlockActionsMenu
-                        canMoveUp={index > 0}
-                        canMoveDown={index < blocks.length - 1}
-                        onMoveUp={() => moveBlockUp(index)}
-                        onMoveDown={() => moveBlockDown(index)}
-                        onDuplicate={() => duplicateBlock(index)}
-                        onDelete={() => removeBlock(index)}
-                        onSetCommentTarget={() => setCommentBlockId(block.id)}
-                      />
-                    </div>
-                    {block.type !== "divider" ? (
-                      <textarea
-                        className="min-h-20 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2 text-sm"
-                        placeholder="/text 내용 또는 /checklist todo 처럼 입력 가능"
-                        value={block.content}
-                        onChange={(event) => updateBlock(index, { content: event.target.value })}
-                        onBlur={(event) => applySlashCommand(index, event.target.value)}
-                      />
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <div className="flex items-center justify-between">
-                <p className="font-medium">AI 요약</p>
-                <Button variant="outline" onClick={handleGenerateSummary}>
-                  요약 생성
-                </Button>
-              </div>
-              <p className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-3 text-sm">
-                {selectedIdea.aiSummary || "요약 없음"}
-              </p>
-            </section>
-              </>
             ) : null}
 
             {studioTab === "collab" ? (

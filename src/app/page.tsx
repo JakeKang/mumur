@@ -1062,6 +1062,33 @@ export default function HomePage() {
     await bootstrap();
   };
 
+  const handleCreateWorkspace = async (data: { name: string; icon: string; color: string }) => {
+    await api("/api/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ teamName: data.name, icon: data.icon, color: data.color })
+    });
+    const loaded = await api("/api/workspaces");
+    setUserTeams(loaded.workspaces || []);
+  };
+
+  const handleUpdateWorkspace = async (id: number, data: { name: string; icon: string; color: string }) => {
+    await api(`/api/workspaces/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data)
+    });
+    const loaded = await api("/api/workspaces");
+    setUserTeams(loaded.workspaces || []);
+  };
+
+  const handleDeleteWorkspace = async (id: number) => {
+    await api(`/api/workspaces/${id}`, { method: "DELETE" });
+    const loaded = await api("/api/workspaces");
+    setUserTeams(loaded.workspaces || []);
+    if (Number(session?.workspace?.id) === id) {
+      await bootstrap();
+    }
+  };
+
   const handleSwitchTeam = async (teamId) => {
     if (!teamId || Number(teamId) === Number(session?.workspace?.id)) {
       return;
@@ -1173,9 +1200,14 @@ export default function HomePage() {
               activePage={activePage}
               onNavigate={handleNavigatePage}
               collapsed={navCollapsed}
-              categories={categoryOptions}
               userName={session?.user?.name || "Mumur 사용자"}
-              teamName={session?.workspace?.name || "팀"}
+              workspaceName={session?.workspace?.name || "워크스페이스"}
+              userWorkspaces={userTeams}
+              activeWorkspaceId={session?.workspace?.id ?? null}
+              onSwitchWorkspace={handleSwitchTeam}
+              onCreateWorkspace={handleCreateWorkspace}
+              onUpdateWorkspace={handleUpdateWorkspace}
+              onDeleteWorkspace={handleDeleteWorkspace}
             />
 
             <section className="flex-1 overflow-auto">

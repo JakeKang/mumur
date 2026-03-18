@@ -683,6 +683,44 @@ async function handleRequest(request, slug, method) {
     return json({ workspace: { id: teamId, name: teamName } }, 201);
   }
 
+  if (s[0] === "workspaces" && s[1] && s.length === 2 && method === "PUT") {
+    const workspaceId = Number(s[1]);
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+      return json({ error: "유효하지 않은 워크스페이스 ID입니다" }, 400);
+    }
+    const ws = db.prepare("SELECT id, owner_id FROM workspaces WHERE id = ?").get(workspaceId);
+    if (!ws) return json({ error: "워크스페이스를 찾을 수 없습니다" }, 404);
+    if (ws.owner_id !== ctx.user.id) return json({ error: "소유자만 수정할 수 있습니다" }, 403);
+    const body = await readJsonBody(request);
+    const name = normalizeText(body.name);
+    const icon = String(body.icon || "📁").slice(0, 8);
+    const color = String(body.color || "#6366f1").slice(0, 20);
+    if (!name) return json({ error: "이름은 필수입니다" }, 400);
+    const now = Date.now();
+    db.prepare("UPDATE workspaces SET name = ?, icon = ?, color = ?, updated_at = ? WHERE id = ?").run(name, icon, color, now, workspaceId);
+    const updated = db.prepare("SELECT id, name, icon, color, owner_id FROM workspaces WHERE id = ?").get(workspaceId);
+    recordTeamEvent(workspaceId, null, ctx.user.id, "workspace.updated", { name });
+    return json({ workspace: updated });
+  }
+
+  if (s[0] === "workspaces" && s[1] && s.length === 2 && method === "DELETE") {
+    const workspaceId = Number(s[1]);
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+      return json({ error: "유효하지 않은 워크스페이스 ID입니다" }, 400);
+    }
+    const ws = db.prepare("SELECT id, owner_id FROM workspaces WHERE id = ?").get(workspaceId);
+    if (!ws) return json({ error: "워크스페이스를 찾을 수 없습니다" }, 404);
+    if (ws.owner_id !== ctx.user.id) return json({ error: "소유자만 삭제할 수 있습니다" }, 403);
+    const wsCount = db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE user_id = ?").get(ctx.user.id).count;
+    if (wsCount <= 1) return json({ error: "마지막 워크스페이스는 삭제할 수 없습니다" }, 400);
+    db.prepare("DELETE FROM workspaces WHERE id = ?").run(workspaceId);
+    const remaining = db.prepare("SELECT wm.team_id FROM workspace_members wm WHERE wm.user_id = ? LIMIT 1").get(ctx.user.id);
+    if (remaining) {
+      db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(remaining.team_id, ctx.session.id);
+    }
+    return json({ ok: true });
+  }
+
   if (s[0] === "workspaces" && s[1] === "switch" && method === "POST") {
     const body = await readJsonBody(request);
     const teamId = Number(body.teamId);
