@@ -1012,7 +1012,7 @@ async function handleRequest(request, slug, method) {
 
     const where = ["i.team_id = ?"];
     const params = [ctx.session.teamId];
-    if (statusFilter && IDEA_STATUS.includes(statusFilter)) {
+    if (statusFilter && IDEA_STATUS.includes(statusFilter as typeof IDEA_STATUS[number])) {
       where.push("i.status = ?");
       params.push(statusFilter);
     }
@@ -1057,7 +1057,7 @@ async function handleRequest(request, slug, method) {
     if (!title) {
       return json({ error: "제목은 필수입니다" }, 400);
     }
-    if (!IDEA_STATUS.includes(status)) {
+    if (!(IDEA_STATUS as readonly string[]).includes(status)) {
       return json({ error: "유효하지 않은 상태입니다" }, 400);
     }
     const now = Date.now();
@@ -1088,7 +1088,8 @@ async function handleRequest(request, slug, method) {
       const category = normalizeText(body.category) || idea.category;
       const status = normalizeText(body.status) || idea.status;
       const blocks = parseBlocks(body.blocks);
-      if (!IDEA_STATUS.includes(status)) {
+    const ideaStatuses: readonly string[] = IDEA_STATUS;
+    if (!ideaStatuses.includes(status)) {
       return json({ error: "유효하지 않은 상태입니다" }, 400);
       }
       db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, blocks_json = ?, updated_at = ? WHERE id = ?").run(
@@ -1600,7 +1601,7 @@ async function handleRequest(request, slug, method) {
     const clientId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const clients = teamStreamSet(teamId);
 
-    let keepAliveTimer;
+    let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
     const stream = new ReadableStream({
       start(controller) {
         clients.set(clientId, { controller, userId: ctx.user.id });

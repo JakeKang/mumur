@@ -62,7 +62,7 @@ function formatTime(value) {
 }
 
 export default function HomePage() {
-  const [authMode, setAuthMode] = useState("login");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
@@ -80,7 +80,7 @@ export default function HomePage() {
   const [navigatorSort, setNavigatorSort] = useState("recent");
   const [navigatorPreset, setNavigatorPreset] = useState("all");
   const [studioTab, setStudioTab] = useState("editor");
-  const [newIdeaForm, setNewIdeaForm] = useState({ title: "", category: "", status: "seed" });
+  const [newIdeaForm, setNewIdeaForm] = useState<{ title: string; category: string; status: import("@/types").IdeaStatus }>({ title: "", category: "", status: "seed" });
   const [ideas, setIdeas] = useState([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState(null);
   const [selectedIdea, setSelectedIdea] = useState(null);

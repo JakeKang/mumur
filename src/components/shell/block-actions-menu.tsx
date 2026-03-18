@@ -1,5 +1,15 @@
 import { Button } from "@/components/ui/button";
 
+type BlockActionsMenuProps = {
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  onSetCommentTarget: () => void;
+};
+
 export function BlockActionsMenu({
   canMoveUp,
   canMoveDown,
@@ -8,7 +18,7 @@ export function BlockActionsMenu({
   onDuplicate,
   onDelete,
   onSetCommentTarget
-}) {
+}: BlockActionsMenuProps) {
   return (
     <details className="relative ml-auto">
       <summary className="cursor-pointer list-none rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-xs text-[var(--foreground)]">

@@ -1,4 +1,4 @@
-export const IDEA_STATUS = ["seed", "sprout", "grow", "harvest", "rest"];
+export const IDEA_STATUS = ["seed", "sprout", "grow", "harvest", "rest"] as const;
 
 export const STATUS_META = {
   seed: { icon: "🌰", label: "씨앗" },

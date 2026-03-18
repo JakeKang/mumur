@@ -1,7 +1,22 @@
+import type { StreamStatus } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Bell, LogOut, PanelLeft, Plus, RefreshCw, SlidersHorizontal } from "lucide-react";
+
+type AppHeaderProps = {
+  streamStatus: StreamStatus;
+  unreadCount: number;
+  teamName: string;
+  authed: boolean;
+  busy: boolean;
+  workspaceVisible: boolean;
+  onToggleWorkspace: () => void;
+  onOpenCreateIdea: () => void;
+  onToggleNotifications: () => void;
+  onRefresh: () => void;
+  onLogout: () => void;
+};
 
 export function AppHeader({
   streamStatus,
@@ -15,7 +30,7 @@ export function AppHeader({
   onToggleNotifications,
   onRefresh,
   onLogout
-}) {
+}: AppHeaderProps) {
   return (
     <Card className="sticky-app-header border-[var(--border)]/90 bg-[var(--surface)]/90 shadow-md">
       <CardHeader className="py-4">

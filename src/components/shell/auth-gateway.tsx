@@ -1,6 +1,21 @@
+import type { FormEvent } from "react";
+import type { AuthMode, LoginForm, RegisterForm } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+
+type AuthGatewayProps = {
+  authMode: AuthMode;
+  setAuthMode: (mode: AuthMode) => void;
+  busy: boolean;
+  loginForm: LoginForm;
+  setLoginForm: (updater: (prev: LoginForm) => LoginForm) => void;
+  registerForm: RegisterForm;
+  setRegisterForm: (updater: (prev: RegisterForm) => RegisterForm) => void;
+  handleLogin: (event: FormEvent<HTMLFormElement>) => void;
+  handleRegister: (event: FormEvent<HTMLFormElement>) => void;
+  error: string;
+};
 
 export function AuthGateway({
   authMode,
@@ -13,7 +28,7 @@ export function AuthGateway({
   handleLogin,
   handleRegister,
   error
-}) {
+}: AuthGatewayProps) {
   return (
     <section className="grid gap-4 rounded-2xl border border-[var(--border)] bg-gradient-to-br from-[var(--surface)] via-[var(--surface-strong)] to-[var(--background)] p-4 shadow-sm md:grid-cols-[1.2fr_1fr] md:p-6">
       <div className="space-y-3">

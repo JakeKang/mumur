@@ -1,4 +1,4 @@
-export function priorityLabel(level) {
+export function priorityLabel(level: string) {
   if (level === "high") {
     return "높음";
   }
@@ -11,11 +11,11 @@ export function priorityLabel(level) {
   return "보통";
 }
 
-export function roleLabel(role) {
+export function roleLabel(role: string) {
   return role === "owner" ? "소유자" : "멤버";
 }
 
-export function invitationStatusLabel(status) {
+export function invitationStatusLabel(status: string) {
   if (status === "pending") {
     return "대기";
   }
@@ -28,7 +28,7 @@ export function invitationStatusLabel(status) {
   return status;
 }
 
-export function threadStatusLabel(status) {
+export function threadStatusLabel(status: string) {
   if (status === "active") {
     return "진행";
   }
@@ -41,7 +41,7 @@ export function threadStatusLabel(status) {
   return status;
 }
 
-export function streamStatusLabel(status) {
+export function streamStatusLabel(status: string) {
   if (status === "online") {
     return "연결됨";
   }
@@ -51,7 +51,7 @@ export function streamStatusLabel(status) {
   return "확인 중";
 }
 
-export function categoryLabel(value) {
+export function categoryLabel(value: string) {
   const raw = String(value || "").trim();
   if (!raw) {
     return "미분류";
@@ -69,7 +69,7 @@ export function categoryLabel(value) {
   return labels[key] || raw;
 }
 
-export function notificationTypeLabel(type) {
+export function notificationTypeLabel(type: string) {
   const labels = {
     "mention.created": "멘션",
     "comment.created": "댓글",
@@ -86,11 +86,11 @@ export function notificationTypeLabel(type) {
   return labels[type] || type;
 }
 
-export function activityTypeLabel(type) {
+export function activityTypeLabel(type: string) {
   return notificationTypeLabel(type);
 }
 
-export function timelineEventLabel(type) {
+export function timelineEventLabel(type: string) {
   const labels = {
     "idea.created": "아이디어 등록",
     "idea.updated": "아이디어 수정",
@@ -110,7 +110,7 @@ export function timelineEventLabel(type) {
   return labels[type] || type;
 }
 
-export function deliveryStatusLabel(status) {
+export function deliveryStatusLabel(status: string) {
   if (/(fail|error)/i.test(String(status || ""))) {
     return "실패";
   }
@@ -123,7 +123,7 @@ export function deliveryStatusLabel(status) {
   return status || "알 수 없음";
 }
 
-export function voteTypeLabel(type) {
+export function voteTypeLabel(type: string) {
   if (type === "binary") {
     return "찬반";
   }

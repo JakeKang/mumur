@@ -1,6 +1,17 @@
 import { Button } from "@/components/ui/button";
 import { DialogShell } from "@/components/ui/dialog-shell";
 
+type ConfirmDialogProps = {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmText?: string;
+  cancelText?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  danger?: boolean;
+};
+
 export function ConfirmDialog({
   open,
   title,
@@ -10,7 +21,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
   danger = false
-}) {
+}: ConfirmDialogProps) {
   return (
     <DialogShell
       open={open}

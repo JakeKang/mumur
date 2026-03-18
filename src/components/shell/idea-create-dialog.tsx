@@ -1,8 +1,22 @@
+import type { FormEvent } from "react";
+import type { IdeaStatus, NewIdeaForm } from "@/types";
+import { STATUS_META as STATUS_META_DEFAULT } from "@/lib/idea-status";
 import { Button } from "@/components/ui/button";
 import { DialogShell } from "@/components/ui/dialog-shell";
 import { Input } from "@/components/ui/input";
 
-export function IdeaCreateDialog({ open, onClose, busy, IDEA_STATUS, STATUS_META, newIdeaForm, setNewIdeaForm, handleCreateIdea }) {
+type IdeaCreateDialogProps = {
+  open: boolean;
+  onClose: () => void;
+  busy: boolean;
+  IDEA_STATUS: readonly IdeaStatus[];
+  STATUS_META: typeof STATUS_META_DEFAULT;
+  newIdeaForm: NewIdeaForm;
+  setNewIdeaForm: (updater: (prev: NewIdeaForm) => NewIdeaForm) => void;
+  handleCreateIdea: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+};
+
+export function IdeaCreateDialog({ open, onClose, busy, IDEA_STATUS, STATUS_META, newIdeaForm, setNewIdeaForm, handleCreateIdea }: IdeaCreateDialogProps) {
   if (!open) {
     return null;
   }
@@ -30,7 +44,7 @@ export function IdeaCreateDialog({ open, onClose, busy, IDEA_STATUS, STATUS_META
           <select
             className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
             value={newIdeaForm.status}
-            onChange={(event) => setNewIdeaForm((prev) => ({ ...prev, status: event.target.value }))}
+            onChange={(event) => setNewIdeaForm((prev) => ({ ...prev, status: event.target.value as IdeaStatus }))}
           >
             {IDEA_STATUS.map((status) => (
               <option key={status} value={status}>
