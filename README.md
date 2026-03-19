@@ -21,13 +21,16 @@
 
 | 기능 | 설명 |
 |------|------|
-| **아이디어 생애주기** | 씨앗 → 발아 → 성장 → 결실 → 휴면 5단계 상태 흐름으로 아이디어를 관리 |
-| **블록 편집기** | 텍스트·체크리스트·코드 등 다양한 블록 타입으로 아이디어를 구조화 |
-| **협업 피드백** | 댓글(인라인 포함), 멘션 자동완성, 투표(찬반·점수), 이모지 리액션 |
-| **토론 스레드** | 아이디어별 토론 스레드 생성·상태 관리(진행·해결·보류)·결론 기록 |
-| **버전 이력** | 기획서 버전 등록, 파일 첨부, 타임라인으로 변경 흐름 추적 |
-| **팀 관리** | 멤버 초대·역할 변경·초대 이력, 다중 팀 전환 |
+| **Markdown 블록 에디터** | Enter로 블록 확정, 클릭으로 재편집. 9가지 블록 타입, hover 메뉴, 드래그 정렬, 자동저장 |
+| **아이디어 생애주기** | 씨앗 → 발아 → 성장 → 결실 → 휴면 5단계 상태 흐름 |
+| **워크스페이스** | 다중 워크스페이스 생성·전환, 아이콘·색상 커스터마이징 |
+| **권한 관리** | viewer / editor / deleter / admin 4단계 역할 기반 접근 제어 |
+| **블록 단위 협업** | 블록별 댓글 스레드, 이모지 리액션, 토론 스레드(진행·해결·보류) |
+| **버전 이력** | 자동 스냅샷(5분 간격) + 수동 버전 등록, 원클릭 복원 |
+| **실시간 presence** | SSE 기반 팀원 접속 현황 브로드캐스트 |
 | **알림 인박스** | 실시간 SSE 스트림, 멘션·댓글·투표 알림, 뮤트 설정 |
+| **파일 블록** | 에디터 내부에서 파일 첨부 및 표시 |
+| **모바일 반응형** | 사이드바 드로어 전환, 터치 대체 UX |
 | **웹훅 연동** | Slack / Discord 웹훅 설정 및 전송 이력 조회 |
 
 ---
@@ -69,7 +72,8 @@ pnpm dev
 | 언어 | TypeScript 5 |
 | 스타일 | [Tailwind CSS 4](https://tailwindcss.com) + 커스텀 UI 프리미티브 |
 | DB | [SQLite](https://www.sqlite.org) (`better-sqlite3`) — 별도 서버 없이 즉시 실행, Postgres로 교체 가능 |
-| E2E 테스트 | [Playwright](https://playwright.dev) v1.58 (5 tests) |
+| Markdown | [marked](https://marked.js.org) + [highlight.js](https://highlightjs.org) |
+| E2E 테스트 | [Playwright](https://playwright.dev) v1.58 (12 tests) |
 
 ---
 
@@ -92,6 +96,7 @@ src/
     api/[...slug]/route.ts   통합 API 엔드포인트
     page.tsx                 메인 페이지
   components/
+    editor/                  Markdown 블록 에디터 (BlockEditor, EditorBlock, useAutoSave)
     shell/                   워크스페이스 화면 · 패널
     ui/                      공통 UI 프리미티브
   lib/
@@ -102,8 +107,9 @@ scripts/
   seed-local-account.ts      로컬 계정 시드
 e2e/
   auth.spec.ts               인증 E2E
-  idea-thread.spec.ts        아이디어 · 협업 E2E
+  idea-thread.spec.ts        에디터 · 협업 E2E
   team-integrations.spec.ts  팀 · 연동 E2E
+  workspace.spec.ts          워크스페이스 · 사이드바 · 모바일 E2E
 ```
 
 ---

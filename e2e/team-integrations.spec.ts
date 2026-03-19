@@ -1,11 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { loginAsLocalTester } from "./helpers";
 
-test("owner can invite member from team page", async ({ page }) => {
+test("admin can invite member from team page", async ({ page }) => {
   await loginAsLocalTester(page);
 
-  await page.getByRole("button", { name: "팀", exact: true }).click();
-  await page.getByRole("button", { name: "팀 관리 페이지로 이동" }).click();
+  await page.getByRole("button", { name: "팀 관리" }).first().click();
   await expect(page.getByRole("heading", { name: "팀 관리" })).toBeVisible();
 
   const inviteEmail = `playwright-member-${Date.now()}@mumur.local`;

@@ -9,3 +9,22 @@ export async function loginAsLocalTester(page: Page) {
   await loginForm.getByRole("button", { name: "로그인" }).click();
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
 }
+
+export async function createIdeaViaApi(page: Page, title: string) {
+  const res = await page.request.post("/api/ideas", {
+    data: {
+      title,
+      category: "qa",
+      status: "seed",
+      blocks: [{ id: `b-${Date.now()}`, type: "paragraph", content: "e2e 초기 내용", checked: false }],
+    },
+  });
+  expect(res.ok()).toBeTruthy();
+  const body = await res.json();
+  return body.idea as { id: number };
+}
+
+export async function navigateToIdea(page: Page, ideaId: number) {
+  await page.goto(`/?idea=${ideaId}`);
+  await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10000 });
+}
