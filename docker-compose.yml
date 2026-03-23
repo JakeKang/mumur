@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mumur-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mumur
+      POSTGRES_PASSWORD: mumur
+      POSTGRES_DB: mumur
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mumur -d mumur"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mumur-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NEXT_DB_PATH: /app/data/mumur.db
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3001
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    volumes:
+      - app-data:/app/data
+    command: sh -c "pnpm run seed:local && pnpm run start"
+
+volumes:
+  postgres-data:
+  app-data:

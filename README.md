@@ -62,6 +62,17 @@ pnpm dev
 
 앱: `http://127.0.0.1:3001` · 테스트 계정: `localtester@mumur.local / mumur1234!`
 
+### Docker Compose로 로컬 실행 (앱 + PostgreSQL)
+
+```bash
+docker compose up --build
+```
+
+- 앱: `http://127.0.0.1:3001`
+- PostgreSQL: `127.0.0.1:5432` (`mumur/mumur`, DB `mumur`)
+
+> 현재 앱 런타임 기본 DB는 SQLite(`NEXT_DB_PATH`)이며, Compose는 PostgreSQL을 함께 띄워 전환 테스트/마이그레이션까지 한 번에 준비합니다.
+
 ---
 
 ## 기술 스택
