@@ -47,3 +47,13 @@ body {
   transform: translateX(0);
   box-shadow: 0 12px 30px rgba(22, 34, 24, 0.1);
 }
+
+@keyframes save-fade {
+  0% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.animate-save-fade {
+  animation: save-fade 3s ease-in forwards;
+}

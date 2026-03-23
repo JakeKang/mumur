@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { Idea, IdeaStatus, Comment } from "@/types";
+import type { Idea, Comment } from "@/types";
 import { STATUS_META as STATUS_META_DEFAULT } from "@/lib/idea-status";
+import { AlertCircle, Check, Loader2 } from "lucide-react";
 import { EditorBlock } from "./EditorBlock";
 import type { EditorBlockData, BlockType } from "./EditorBlock";
 import { useAutoSave } from "./useAutoSave";
@@ -73,27 +74,32 @@ const BLOCK_TYPE_OPTIONS: { type: BlockType; icon: string; label: string }[] = [
 ];
 
 function SaveStatusBadge({ status, onRetry }: { status: SaveStatus; onRetry: () => void }) {
-  if (status === "idle") return null;
-  const map: Record<string, { text: string; cls: string }> = {
-    dirty:  { text: "변경됨",            cls: "text-[var(--muted)]" },
-    saving: { text: "저장 중...",        cls: "text-[var(--muted)] animate-pulse" },
-    saved:  { text: "저장됨 ✓",         cls: "text-emerald-600" },
-    error:  { text: "저장 실패 — 재시도", cls: "text-rose-600 cursor-pointer underline" },
+  if (status === "idle") {
+    return null;
+  }
+
+  const map: Record<string, { text: string; cls: string; icon: React.ReactNode }> = {
+    dirty: { text: "저장 대기", cls: "text-[var(--muted)]", icon: <Loader2 className="h-3.5 w-3.5" /> },
+    saving: { text: "저장 중...", cls: "text-sky-600", icon: <Loader2 className="h-3.5 w-3.5 animate-spin" /> },
+    saved: { text: "저장됨", cls: "text-emerald-600", icon: <Check className="h-3.5 w-3.5" /> },
+    error: { text: "저장 실패", cls: "text-rose-600", icon: <AlertCircle className="h-3.5 w-3.5" /> },
   };
-  const { text, cls } = map[status] ?? map.dirty;
+  const { text, cls, icon } = map[status] ?? map.dirty;
   if (status === "error") {
     return (
       <button
         type="button"
-        className={`fixed right-6 top-3 z-50 select-none text-xs ${cls}`}
+        className={`fixed right-6 top-3 z-50 inline-flex select-none items-center gap-1.5 text-xs ${cls}`}
         onClick={onRetry}
       >
+        {icon}
         {text}
       </button>
     );
   }
   return (
-    <span className={`fixed right-6 top-3 z-50 select-none text-xs ${cls}`}>
+    <span className={`fixed right-6 top-3 z-50 inline-flex select-none items-center gap-1.5 text-xs ${cls} ${status === "saved" ? "animate-save-fade" : ""}`}>
+      {icon}
       {text}
     </span>
   );
@@ -111,7 +117,7 @@ type BlockRowProps = {
   blockReactions: { emoji: string; count: number; mine: boolean }[];
   onFocus: () => void;
   onToggleSelect: (shiftKey: boolean) => void;
-  onChange: (content: string, type?: BlockType) => void;
+  onChange: (content: string, type?: BlockType, options?: { checked?: boolean }) => void;
   onEnter: () => void;
   onDelete: () => void;
   onTypeChange: (type: BlockType) => void;
@@ -308,7 +314,6 @@ type BlockEditorProps = {
   readOnly?: boolean;
   onSaveBlocks: (blocks: EditorBlockData[]) => Promise<void>;
   onSaveTitle: (title: string) => Promise<void>;
-  onSaveStatus?: (status: IdeaStatus) => Promise<void>;
   onOpenBlockComments?: (blockId: string) => void;
   onBlockReaction?: (blockId: string, emoji: string) => void;
   onUploadFile?: (blockId: string, file: File) => Promise<{ name: string; size: number; type: string; filePath: string; status: string }>;
@@ -323,7 +328,6 @@ export function BlockEditor({
   readOnly = false,
   onSaveBlocks,
   onSaveTitle,
-  onSaveStatus,
   STATUS_META,
   formatTime,
   onOpenBlockComments,
@@ -375,13 +379,18 @@ export function BlockEditor({
   );
 
   const handleChange = useCallback(
-    (index: number, content: string, type?: BlockType) => {
+    (index: number, content: string, type?: BlockType, options?: { checked?: boolean }) => {
       if (readOnly) {
         return;
       }
       setBlocks((prev) => {
         const next = [...prev];
-        next[index] = { ...next[index], content, ...(type ? { type } : {}) };
+        next[index] = {
+          ...next[index],
+          content,
+          ...(type ? { type } : {}),
+          ...(typeof options?.checked === "boolean" ? { checked: options.checked } : {})
+        };
         return next;
       });
       markDirty();
@@ -501,18 +510,6 @@ export function BlockEditor({
     markDirty();
   }, [markDirty, readOnly, selectedBlockIds, selectedCount]);
 
-  const changeSelectedType = useCallback(
-    (type: BlockType) => {
-      if (readOnly || selectedCount === 0) {
-        return;
-      }
-      const selected = new Set(selectedBlockIds);
-      setBlocks((prev) => prev.map((item) => (selected.has(item.id) ? { ...item, type } : item)));
-      markDirty();
-    },
-    [markDirty, readOnly, selectedBlockIds, selectedCount]
-  );
-
   const moveSelected = useCallback(
     (direction: "up" | "down") => {
       if (readOnly || selectedCount === 0) {
@@ -573,28 +570,9 @@ export function BlockEditor({
           }}
         />
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-          {onSaveStatus ? (
-            <select
-              className="rounded border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-xs text-[var(--foreground)]"
-              value={idea.status}
-              onChange={(e) => {
-                if (readOnly) {
-                  return;
-                }
-                onSaveStatus(e.target.value as IdeaStatus);
-                markDirty();
-              }}
-              disabled={readOnly}
-            >
-              {Object.entries(STATUS_META).map(([key, meta]) => (
-                <option key={key} value={key}>{meta.icon} {meta.label}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="rounded border border-[var(--border)] px-1.5 py-0.5">
-              {statusMeta.icon} {statusMeta.label}
-            </span>
-          )}
+          <span className="rounded border border-[var(--border)] px-1.5 py-0.5">
+            {statusMeta.icon} {statusMeta.label}
+          </span>
           <span>수정 {formatTime(idea.updatedAt)}</span>
         </div>
       </div>
@@ -621,36 +599,6 @@ export function BlockEditor({
         }}
         aria-label="블록 에디터"
       >
-        {!readOnly ? (
-          <div className="sticky top-0 z-20 mb-2 flex flex-wrap items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs">
-            <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={selectAllBlocks}>전체 선택</button>
-            <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={clearSelection} disabled={selectedCount === 0}>선택 해제</button>
-            <span className="rounded bg-[var(--surface-strong)] px-2 py-1 text-[var(--muted)]">{`선택 ${selectedCount}`}</span>
-            <div className="ml-auto flex flex-wrap items-center gap-1">
-              <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={() => moveSelected("up")} disabled={selectedCount === 0}>위로</button>
-              <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={() => moveSelected("down")} disabled={selectedCount === 0}>아래로</button>
-              <select
-                className="h-7 rounded border border-[var(--border)] bg-[var(--surface)] px-1"
-                defaultValue=""
-                onChange={(event) => {
-                  const value = event.target.value as BlockType;
-                  if (value) {
-                    changeSelectedType(value);
-                    event.currentTarget.value = "";
-                  }
-                }}
-                disabled={selectedCount === 0}
-              >
-                <option value="">타입 변경</option>
-                {BLOCK_TYPE_OPTIONS.map((opt) => (
-                  <option key={`batch-type-${opt.type}`} value={opt.type}>{opt.label}</option>
-                ))}
-              </select>
-              <button type="button" className="rounded border border-rose-200 px-2 py-1 text-rose-600" onClick={deleteSelectedBlocks} disabled={selectedCount === 0}>삭제</button>
-            </div>
-          </div>
-        ) : null}
-
         {blocks.map((block, index) => {
           const reactionSummary = reactionsByTarget[`block:${block.id}`] || { reactions: [], mine: [] };
           const blockReactions = (reactionSummary.reactions || []).map((item) => ({
@@ -677,7 +625,7 @@ export function BlockEditor({
               }
             }}
             onToggleSelect={(shiftKey) => toggleBlockSelection(index, shiftKey)}
-            onChange={(content, type) => handleChange(index, content, type)}
+            onChange={(content, type, options) => handleChange(index, content, type, options)}
             onEnter={() => addBlock(index)}
             onDelete={() => handleDelete(index)}
             onTypeChange={(type) => handleTypeChange(index, type)}

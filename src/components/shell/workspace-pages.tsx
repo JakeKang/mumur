@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PriorityBadge } from "@/components/ui/priority-badge";
 import { activityTypeLabel, categoryLabel, invitationStatusLabel, roleLabel } from "@/lib/ui-labels";
+import { useState } from "react";
 
 function ideaPriorityMeta(idea) {
   const engagement = Number(idea.commentCount || 0) + Number(idea.reactionCount || 0) + Number(idea.versionCount || 0);
@@ -19,15 +20,16 @@ function ideaPriorityMeta(idea) {
 export function DashboardSurface({ dashboard, ideas, STATUS_META, onSelectIdea, formatTime, workspaceName = "워크스페이스", onOpenCreateIdea, canCreateIdea = true }) {
   const total = Number(dashboard?.metrics?.totalIdeas || ideas.length || 0);
   const statusKeys = ["seed", "sprout", "grow", "harvest", "rest"];
-  const topIdeas = [...ideas]
-    .sort((a, b) => Number(b.reactionCount || 0) - Number(a.reactionCount || 0))
-    .slice(0, 4);
+  const recentIdeas = Array.isArray(dashboard?.recentIdeas) && dashboard.recentIdeas.length
+    ? dashboard.recentIdeas
+    : [...ideas].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0)).slice(0, 12);
+  const workspaceCards = Array.isArray(dashboard?.workspaces) ? dashboard.workspaces : [];
 
   return (
     <div className="space-y-7">
       <div>
-        <h1 className="font-serif text-3xl font-bold tracking-tight text-[var(--foreground)]">대시보드</h1>
-        <p className="mt-1 text-sm text-[var(--muted)]">{`${workspaceName}의 아이디어 현황을 한눈에 확인하세요`}</p>
+        <h1 className="font-serif text-3xl font-bold tracking-tight text-[var(--foreground)]">통합 대시보드</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">전체 워크스페이스 흐름을 한 화면에서 확인합니다.</p>
       </div>
 
       {total === 0 ? (
@@ -40,6 +42,62 @@ export function DashboardSurface({ dashboard, ideas, STATUS_META, onSelectIdea, 
           </CardContent>
         </Card>
       ) : null}
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <Card className="border-[var(--border)] bg-[var(--surface)]">
+          <CardContent className="p-4">
+            <p className="text-xs text-[var(--muted)]">공간 수</p>
+            <p className="text-2xl font-bold text-[var(--foreground)]">{Number(dashboard?.metrics?.totalWorkspaces || 0)}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-[var(--border)] bg-[var(--surface)]">
+          <CardContent className="p-4">
+            <p className="text-xs text-[var(--muted)]">전체 아이디어</p>
+            <p className="text-2xl font-bold text-[var(--foreground)]">{total}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-[var(--border)] bg-[var(--surface)]">
+          <CardContent className="p-4">
+            <p className="text-xs text-[var(--muted)]">진행 아이디어</p>
+            <p className="text-2xl font-bold text-[var(--foreground)]">{Number(dashboard?.metrics?.activeIdeas || 0)}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-[var(--border)] bg-[var(--surface)]">
+          <CardContent className="p-4">
+            <p className="text-xs text-[var(--muted)]">최근 7일 활동</p>
+            <p className="text-2xl font-bold text-[var(--foreground)]">{Number(dashboard?.metrics?.recentActivity || 0)}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="border-[var(--border)] bg-[var(--surface)]">
+        <CardHeader>
+          <CardTitle className="text-base">워크스페이스 목록</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {workspaceCards.length ? (
+            workspaceCards.map((workspace) => (
+              <div key={`dash-workspace-${workspace.id}`} className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="truncate text-sm font-semibold text-[var(--foreground)]">{workspace.name}</p>
+                  <span className="text-xs text-[var(--muted)]">{workspace.icon || "📁"}</span>
+                </div>
+                <p className="text-xs text-[var(--muted)]">{`아이디어 ${workspace.ideaCount} · 최근활동 ${workspace.recentActivity}`}</p>
+                <p className="mb-2 text-xs text-[var(--muted)]">{`최근 수정 ${workspace.lastUpdatedAt ? formatTime(workspace.lastUpdatedAt) : "-"}`}</p>
+                <div className="flex flex-wrap gap-1">
+                  {statusKeys.map((status) => (
+                    <span key={`dash-workspace-status-${workspace.id}-${status}`} className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
+                      {`${STATUS_META[status]?.icon || "💡"} ${workspace.statusCounts?.[status] || 0}`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-[var(--muted)]">표시할 워크스페이스 요약이 없습니다.</p>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-3 md:grid-cols-5">
         {statusKeys.map((status) => (
@@ -72,10 +130,10 @@ export function DashboardSurface({ dashboard, ideas, STATUS_META, onSelectIdea, 
       </Card>
 
       <div>
-        <h2 className="mb-3 text-base font-semibold text-[var(--foreground)]">주목받는 아이디어</h2>
+        <h2 className="mb-3 text-base font-semibold text-[var(--foreground)]">최근 수정된 아이디어</h2>
         <div className="grid gap-3 md:grid-cols-2">
-          {topIdeas.length ? (
-            topIdeas.map((idea) => {
+          {recentIdeas.length ? (
+            recentIdeas.map((idea) => {
               const priority = ideaPriorityMeta(idea);
               return (
               <button
@@ -92,13 +150,13 @@ export function DashboardSurface({ dashboard, ideas, STATUS_META, onSelectIdea, 
                   <span className="text-xs text-[var(--muted)]">{formatTime(idea.updatedAt)}</span>
                 </div>
                 <p className="mb-1 text-sm font-semibold text-[var(--foreground)]">{idea.title}</p>
-                <p className="mb-2 text-xs text-[var(--muted)]">{categoryLabel(idea.category)}</p>
+                <p className="mb-2 text-xs text-[var(--muted)]">{`${categoryLabel(idea.category)} · ${idea.workspaceName || workspaceName}`}</p>
                 <p className="text-xs text-[var(--muted)]">{`💬 ${idea.commentCount || 0} · 👍 ${idea.reactionCount || 0} · 📄 ${idea.versionCount || 0}`}</p>
               </button>
               );
             })
           ) : (
-            <p className="text-sm text-[var(--muted)]">주목 아이디어가 아직 없습니다. 새 아이디어를 만들어 보세요.</p>
+            <p className="text-sm text-[var(--muted)]">최근 수정된 아이디어가 아직 없습니다.</p>
           )}
         </div>
       </div>
@@ -479,9 +537,16 @@ export function TeamSurface({
   retryTeamInvitation,
   requestCancelInvitation,
   teamInvitationMessage,
-  formatTime
+  formatTime,
+  webhooks,
+  webhookForm,
+  setWebhookForm,
+  handleSaveWebhook,
+  webhookSaving
 }) {
   const canManageMembers = teamMe?.isOwner || teamMe?.role === "admin" || teamMe?.role === "owner";
+  const canManageWebhooks = canManageMembers;
+  const [showWebhookEditor, setShowWebhookEditor] = useState(false);
 
   return (
     <div className="space-y-5">
@@ -579,6 +644,56 @@ export function TeamSurface({
                 ) : null}
               </div>
             ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-[var(--border)] bg-[var(--surface)]">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-base">연동</CardTitle>
+            <Button type="button" size="sm" variant="outline" onClick={() => setShowWebhookEditor((prev) => !prev)}>
+              웹훅 설정 열기
+            </Button>
+          </div>
+          <p className="text-xs text-[var(--muted)]">Slack/Discord 웹훅을 팀 단위로 연결합니다.</p>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-0">
+          {showWebhookEditor ? (
+            <form className="grid gap-2 md:grid-cols-[120px_1fr_auto]" onSubmit={handleSaveWebhook}>
+              <select
+                className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-sm"
+                value={webhookForm.platform}
+                onChange={(event) => setWebhookForm((prev) => ({ ...prev, platform: event.target.value }))}
+                disabled={!canManageWebhooks || webhookSaving}
+              >
+                <option value="slack">Slack</option>
+                <option value="discord">Discord</option>
+              </select>
+              <Input
+                placeholder="https://..."
+                value={webhookForm.webhookUrl}
+                onChange={(event) => setWebhookForm((prev) => ({ ...prev, webhookUrl: event.target.value }))}
+                disabled={!canManageWebhooks || webhookSaving}
+              />
+              <Button type="submit" disabled={!canManageWebhooks || webhookSaving || !webhookForm.webhookUrl.trim()}>
+                {webhookSaving ? "저장 중..." : "저장"}
+              </Button>
+            </form>
+          ) : null}
+
+          <div className="space-y-1.5">
+            {webhooks?.length ? (
+              webhooks.map((hook) => (
+                <div key={`team-webhook-${hook.platform}`} className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-xs">
+                  <p className="font-semibold text-[var(--foreground)]">{hook.platform === "discord" ? "Discord" : "Slack"}</p>
+                  <p className="truncate text-[var(--muted)]">{hook.webhookUrl}</p>
+                  <p className="text-[var(--muted)]">{hook.enabled ? "활성" : "비활성"}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-xs text-[var(--muted)]">저장된 웹훅이 없습니다.</p>
+            )}
           </div>
         </CardContent>
       </Card>

@@ -3,23 +3,11 @@ import { Badge } from "@/components/ui/badge";
 import { MentionAssistPanel } from "@/components/shell/mention-assist-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { ThreadWorkflowDrawer } from "@/components/shell/thread-workflow-drawer";
 import { categoryLabel, timelineEventLabel } from "@/lib/ui-labels";
-import { ArrowLeft, Bot, GitBranch, MessageSquareText, ScrollText, Sparkles, SquarePen } from "lucide-react";
+import { ArrowLeft, ScrollText, SquarePen } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { BlockEditor } from "@/components/editor/BlockEditor";
 import { PriorityBadge } from "@/components/ui/priority-badge";
-
-type AssistantMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  createdAt: number;
-};
-
-function nextBlockId() {
-  return `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
 
 export function IdeaStudioPanel({
   selectedIdea,
@@ -28,7 +16,6 @@ export function IdeaStudioPanel({
   setStudioTab,
   STATUS_META,
   handleSaveIdea,
-  updateSelectedIdeaField,
   blocks,
   setCommentBlockId,
   commentDraft,
@@ -41,30 +28,8 @@ export function IdeaStudioPanel({
   commentFilterBlockId,
   setCommentFilterBlockId,
   applyCommentFilter,
-  reactions,
   reactionsByTarget,
   handleReaction,
-  votes,
-  handleVote,
-  handleCreateThread,
-  threadForm,
-  setThreadForm,
-  THREAD_STATUS,
-  threads,
-  selectedThreadId,
-  setSelectedThreadId,
-  syncThreadEditor,
-  selectedIdeaId,
-  api,
-  setThreadComments,
-  selectedThread,
-  handleUpdateThread,
-  threadEdit,
-  setThreadEdit,
-  handleAddThreadComment,
-  threadCommentDraft,
-  setThreadCommentDraft,
-  threadComments,
   formatTime,
   handleCreateVersion,
   handleRestoreVersion,
@@ -73,24 +38,14 @@ export function IdeaStudioPanel({
   versions,
   timeline,
   teamMembers,
-  presenceUsers,
   myRole,
   canEditIdea,
   currentUserId,
-  handleUpdateThreadComment,
-  handleDeleteThreadComment,
   handleUploadBlockFile
 }) {
-  const [threadListFilter, setThreadListFilter] = useState("all");
-  const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentDraft, setEditingCommentDraft] = useState("");
   const [commentMentionIndex, setCommentMentionIndex] = useState(0);
-  const [threadMentionIndex, setThreadMentionIndex] = useState(0);
-  const [editorMode, setEditorMode] = useState<"markdown" | "review" | "mindmap">("markdown");
-  const [assistantDraft, setAssistantDraft] = useState("");
-  const [assistantBusy, setAssistantBusy] = useState(false);
-  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [restoreTarget, setRestoreTarget] = useState<null | {
     versionId: number;
     label: string;
@@ -138,26 +93,6 @@ export function IdeaStudioPanel({
     }
     window.localStorage.setItem("mumur.mentions.recentEmails", JSON.stringify(recentMentionEmails));
   }, [recentMentionEmails]);
-  const threadStatusCounts = useMemo(() => {
-    return threads.reduce(
-      (acc, item) => {
-        if (item?.status && Object.prototype.hasOwnProperty.call(acc, item.status)) {
-          acc[item.status] += 1;
-        }
-        return acc;
-      },
-      { active: 0, resolved: 0, on_hold: 0 }
-    );
-  }, [threads]);
-
-  const visibleThreads = useMemo(() => {
-    if (threadListFilter === "all") {
-      return threads;
-    }
-    return threads.filter((item) => item.status === threadListFilter);
-  }, [threadListFilter, threads]);
-
-  const visiblePresenceUsers = useMemo(() => (presenceUsers || []).slice(0, 3), [presenceUsers]);
   const isReadOnly = !canEditIdea || myRole === "viewer";
   const canModerate = myRole === "admin" || myRole === "owner";
   const ideaPriority = useMemo(() => {
@@ -239,11 +174,8 @@ export function IdeaStudioPanel({
   };
 
   const commentMentionToken = mentionTokenFromText(commentDraft);
-  const threadMentionToken = mentionTokenFromText(threadCommentDraft);
   const commentMentionContext = hasMentionContextFromText(commentDraft);
-  const threadMentionContext = hasMentionContextFromText(threadCommentDraft);
   const commentMentionMatches = mentionMatches(commentMentionToken, commentMentionContext);
-  const threadMentionMatches = mentionMatches(threadMentionToken, threadMentionContext);
   const mentionPreviewMembers = (value) => {
     const tokens = extractMentionTokens(value);
     const collected = [];
@@ -258,29 +190,17 @@ export function IdeaStudioPanel({
     return collected;
   };
   const commentMentionPreview = mentionPreviewMembers(commentDraft);
-  const threadMentionPreview = mentionPreviewMembers(threadCommentDraft);
 
   const activeCommentMentionIndex = commentMentionMatches.length
     ? Math.min(commentMentionIndex, commentMentionMatches.length - 1)
     : 0;
-  const activeThreadMentionIndex = threadMentionMatches.length
-    ? Math.min(threadMentionIndex, threadMentionMatches.length - 1)
-    : 0;
   const commentMentionListboxId = "comment-mention-listbox";
-  const threadMentionListboxId = "thread-mention-listbox";
   const commentMentionStatusId = "comment-mention-status";
-  const threadMentionStatusId = "thread-mention-status";
   const activeCommentMentionOptionId = commentMentionMatches[activeCommentMentionIndex]
     ? `comment-mention-option-${commentMentionMatches[activeCommentMentionIndex].userId}`
     : undefined;
-  const activeThreadMentionOptionId = threadMentionMatches[activeThreadMentionIndex]
-    ? `thread-mention-option-${threadMentionMatches[activeThreadMentionIndex].userId}`
-    : undefined;
   const commentMentionAnnouncement = commentMentionMatches.length
     ? `${commentMentionMatches.length}개의 멘션 추천이 있습니다. 현재 선택 ${activeCommentMentionIndex + 1}번.`
-    : "멘션 추천이 없습니다.";
-  const threadMentionAnnouncement = threadMentionMatches.length
-    ? `${threadMentionMatches.length}개의 멘션 추천이 있습니다. 현재 선택 ${activeThreadMentionIndex + 1}번.`
     : "멘션 추천이 없습니다.";
 
   const applyMention = (setter, currentValue, email) => {
@@ -338,8 +258,6 @@ export function IdeaStudioPanel({
     }
   };
 
-  const quickAssistantPrompts = ["핵심 리스크 정리", "다음 액션 3개 제안", "현재 상태 요약"];
-
   const previewFromVersion = (version) => {
     const raw = String(version?.notes || "").trim();
     if (!raw) {
@@ -359,132 +277,6 @@ export function IdeaStudioPanel({
     return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
   };
 
-  const mindmapNodes = useMemo(() => {
-    if (!selectedIdea) {
-      return [];
-    }
-    return (selectedIdea.blocks || [])
-      .filter((block) => ["heading1", "heading2", "heading3", "paragraph"].includes(block.type))
-      .map((block) => ({ id: block.id, text: String(block.content || "").trim() }))
-      .filter((block) => Boolean(block.text))
-      .slice(0, 9);
-  }, [selectedIdea]);
-
-  const currentIdeaId = selectedIdea?.id ?? null;
-  const currentIdeaSummary = selectedIdea?.aiSummary ?? "";
-
-  useEffect(() => {
-    if (!currentIdeaId) {
-      setAssistantMessages([]);
-      setAssistantDraft("");
-      setAssistantBusy(false);
-      return;
-    }
-    const initial = currentIdeaSummary
-      ? `현재 저장된 요약:\n${currentIdeaSummary}`
-      : "안녕하세요. 이 아이디어의 상태 요약, 리스크 정리, 다음 액션 제안을 도와드릴게요.";
-    setAssistantMessages([
-      {
-        id: `assistant-init-${currentIdeaId}`,
-        role: "assistant",
-        content: initial,
-        createdAt: Date.now()
-      }
-    ]);
-    setAssistantDraft("");
-    setAssistantBusy(false);
-  }, [currentIdeaId, currentIdeaSummary]);
-
-  const runIdeaSummary = async () => {
-    if (!selectedIdeaId) {
-      return "아이디어가 선택되지 않았습니다.";
-    }
-    const data = await api(`/api/ideas/${selectedIdeaId}/summary`, { method: "POST" });
-    if (data?.aiSummary) {
-      updateSelectedIdeaField("aiSummary", data.aiSummary);
-      return `요약을 갱신했습니다.\n${data.aiSummary}`;
-    }
-    return "요약 생성에 실패했습니다.";
-  };
-
-  const appendTemplateBlock = async (type, content) => {
-    if (!selectedIdea || isReadOnly) {
-      return;
-    }
-    await handleSaveIdea(null, {
-      blocks: [
-        ...(selectedIdea.blocks || []),
-        { id: nextBlockId(), type, content, checked: false }
-      ]
-    });
-  };
-
-  const buildAssistantReply = async (prompt) => {
-    const text = String(prompt || "").toLowerCase();
-    const openThreads = threads.filter((thread) => thread.status === "active").length;
-    const totalComments = comments.length;
-    const latest = selectedIdea?.updatedAt ? formatTime(selectedIdea.updatedAt) : "-";
-
-    if (text.includes("요약") || text.includes("summary")) {
-      if (isReadOnly) {
-        return "viewer 권한에서는 요약을 생성할 수 없습니다.";
-      }
-      return runIdeaSummary();
-    }
-
-    if (text.includes("리스크") || text.includes("위험") || text.includes("risk")) {
-      return [
-        `리스크 스냅샷 (${latest})`,
-        `- 진행 중 스레드: ${openThreads}개`,
-        `- 전체 댓글: ${totalComments}개`,
-        `- 현재 아이디어 상태: ${STATUS_META[selectedIdea?.status]?.label || selectedIdea?.status || "-"}`,
-        "- 권장: 진행 중 스레드 우선순위 정렬 후 1개씩 해결 상태로 이동"
-      ].join("\n");
-    }
-
-    if (text.includes("다음") || text.includes("todo") || text.includes("액션")) {
-      return [
-        "추천 다음 액션", 
-        "1) 해결되지 않은 스레드 1개를 선택해 결론을 작성합니다.",
-        "2) 결론 내용을 체크리스트 블록으로 변환해 실행 항목을 고정합니다.",
-        "3) 작업 후 버전을 하나 등록해 변경 이력을 남깁니다."
-      ].join("\n");
-    }
-
-    return [
-      "요청을 반영한 기본 분석입니다.",
-      `- 블록 수: ${(selectedIdea?.blocks || []).length}개`,
-      `- 댓글 수: ${totalComments}개`,
-      `- 진행 스레드: ${openThreads}개`,
-      "원하면 '현재 상태 요약' 또는 '핵심 리스크 정리'로 더 구체화할 수 있습니다."
-    ].join("\n");
-  };
-
-  const sendAssistantPrompt = async (prompt) => {
-    const content = String(prompt || "").trim();
-    if (!content || !selectedIdea) {
-      return;
-    }
-    const createdAt = Date.now();
-    setAssistantMessages((prev) => [...prev, { id: `assistant-user-${createdAt}`, role: "user", content, createdAt }]);
-    setAssistantDraft("");
-    setAssistantBusy(true);
-    try {
-      const reply = await buildAssistantReply(content);
-      setAssistantMessages((prev) => [
-        ...prev,
-        { id: `assistant-ai-${Date.now()}`, role: "assistant", content: String(reply || "응답을 만들지 못했습니다."), createdAt: Date.now() }
-      ]);
-    } catch {
-      setAssistantMessages((prev) => [
-        ...prev,
-        { id: `assistant-ai-${Date.now()}`, role: "assistant", content: "요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.", createdAt: Date.now() }
-      ]);
-    } finally {
-      setAssistantBusy(false);
-    }
-  };
-
   return (
     <Card className={`studio-shell min-h-[70vh] xl:max-h-[calc(100vh-2rem)] xl:overflow-auto ${selectedIdea ? "studio-shell-detail" : "studio-shell-list"}`}>
       <CardContent className="space-y-5">
@@ -496,69 +288,31 @@ export function IdeaStudioPanel({
         ) : (
           <>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-              <div className="sticky top-0 z-20 mb-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-1">
-                    <button
-                      type="button"
-                      className={`rounded px-2 py-1 text-xs ${editorMode === "markdown" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
-                      onClick={() => setEditorMode("markdown")}
-                    >
-                      <SquarePen className="mr-1 inline-block h-3.5 w-3.5" />
-                      Markdown
-                    </button>
-                    <button
-                      type="button"
-                      className={`rounded px-2 py-1 text-xs ${editorMode === "review" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
-                      onClick={() => setEditorMode("review")}
-                    >
-                      <MessageSquareText className="mr-1 inline-block h-3.5 w-3.5" />
-                      Review
-                    </button>
-                    <button
-                      type="button"
-                      className={`rounded px-2 py-1 text-xs ${editorMode === "mindmap" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
-                      onClick={() => setEditorMode("mindmap")}
-                    >
-                      <GitBranch className="mr-1 inline-block h-3.5 w-3.5" />
-                      Mindmap
-                    </button>
-                  </div>
-
-                  <div className="ml-auto flex flex-wrap items-center gap-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          const reply = await runIdeaSummary();
-                          setAssistantMessages((prev) => [
-                            ...prev,
-                            { id: `assistant-ai-${Date.now()}`, role: "assistant", content: reply, createdAt: Date.now() }
-                          ]);
-                        } catch (error) {
-                          const message = error instanceof Error ? error.message : "요약 생성에 실패했습니다.";
-                          setAssistantMessages((prev) => [
-                            ...prev,
-                            { id: `assistant-ai-${Date.now()}`, role: "assistant", content: message, createdAt: Date.now() }
-                          ]);
-                        }
-                      }}
-                      disabled={isReadOnly}
-                    >
-                      <Sparkles className="mr-1 h-3.5 w-3.5" />
-                      AI 요약
-                    </Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => appendTemplateBlock("checklist", "실행 항목")} disabled={isReadOnly}>체크리스트</Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => appendTemplateBlock("heading2", "다음 작업")} disabled={isReadOnly}>다음 작업</Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => setStudioTab("collab")}>사이드 패널</Button>
-                  </div>
-                </div>
-              </div>
-
               <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">상태 {STATUS_META[selectedIdea.status]?.icon || "💡"} {STATUS_META[selectedIdea.status]?.label || selectedIdea.status}</span>
+                <span className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs font-medium text-[var(--foreground)]">
+                  <SquarePen className="h-3.5 w-3.5" />
+                  블록 에디터
+                </span>
+                <select
+                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-xs text-[var(--foreground)]"
+                  value={selectedIdea.status}
+                  onChange={(event) => {
+                    if (isReadOnly) {
+                      return;
+                    }
+                    void handleSaveIdea(null, { status: event.target.value });
+                  }}
+                  disabled={isReadOnly}
+                  aria-label="문서 상태 변경"
+                  title={isReadOnly ? "viewer 권한에서는 상태를 변경할 수 없습니다" : "문서 상태 변경"}
+                >
+                  {Object.keys(STATUS_META).map((key) => {
+                    const meta = STATUS_META[key];
+                    return (
+                      <option key={`studio-status-${key}`} value={key}>{meta.icon} {meta.label}</option>
+                    );
+                  })}
+                </select>
                 <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">우선순위 <PriorityBadge level={ideaPriority} /></span>
                 <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">생성 {formatTime(selectedIdea.createdAt)}</span>
                 <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">수정 {formatTime(selectedIdea.updatedAt)}</span>
@@ -587,19 +341,6 @@ export function IdeaStudioPanel({
                   </button>
                   <button
                     type="button"
-                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "collab" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
-                    onClick={() => setStudioTab("collab")}
-                  >
-                    <MessageSquareText className="h-4 w-4" />
-                    협업
-                    {comments.length > 0 && (
-                      <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-semibold text-white">
-                        {comments.length}
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
                     className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "docs" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
                     onClick={() => setStudioTab("docs")}
                   >
@@ -607,53 +348,13 @@ export function IdeaStudioPanel({
                   </button>
                 </div>
 
-                <div className="flex shrink-0 items-center gap-1.5 pb-1 pr-1">
-                  {visiblePresenceUsers.length ? (
-                    visiblePresenceUsers.map((user) => (
-                      <span
-                        key={`presence-${user.userId}`}
-                        title={`${user.name} (온라인)`}
-                        className="relative flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-semibold text-[var(--surface)]"
-                      >
-                        {String(user.name || "?")[0].toUpperCase()}
-                        <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[var(--surface)] bg-emerald-500" />
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-[10px] text-[var(--muted)]">온라인 없음</span>
-                  )}
-                </div>
               </div>
               {isReadOnly ? (
                 <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
-                  viewer 권한에서는 편집 탭이 비활성화됩니다. 댓글/토론/문서 탭에서 협업 내용을 확인할 수 있습니다.
+                  viewer 권한에서는 편집 탭이 비활성화됩니다. 문서 탭에서 타임라인을 확인할 수 있습니다.
                 </p>
               ) : null}
             </div>
-
-            {studioTab === "editor" && editorMode === "review" ? (
-              <section className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3 text-xs text-[var(--muted)]">
-                <p className="font-medium text-[var(--foreground)]">리뷰 모드</p>
-                <p>{`진행 중 스레드 ${threadStatusCounts.active}개 · 댓글 ${comments.length}개 · 마지막 수정 ${formatTime(selectedIdea.updatedAt)}`}</p>
-              </section>
-            ) : null}
-
-            {studioTab === "editor" && editorMode === "mindmap" ? (
-              <section className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-                <p className="mb-2 text-sm font-medium text-[var(--foreground)]">아이디어 맵</p>
-                {mindmapNodes.length ? (
-                  <div className="grid gap-2 md:grid-cols-3">
-                    {mindmapNodes.map((node) => (
-                      <div key={`mindmap-node-${node.id}`} className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-[var(--foreground)]">
-                        {node.text}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-[var(--muted)]">맵으로 표시할 텍스트 블록이 아직 없습니다.</p>
-                )}
-              </section>
-            ) : null}
 
             {studioTab === "editor" ? (
               <BlockEditor
@@ -676,14 +377,11 @@ export function IdeaStudioPanel({
                 onSaveTitle={async (title) => {
                   await handleSaveIdea(null, { title });
                 }}
-                onSaveStatus={async (status) => {
-                  await handleSaveIdea(null, { status });
-                }}
                 onUploadFile={handleUploadBlockFile}
                 onOpenBlockComments={(blockId) => {
                   setCommentBlockId(blockId);
                   setCommentFilterBlockId(blockId);
-                  setStudioTab("collab");
+                  setStudioTab("editor");
                 }}
                 onBlockReaction={async (blockId, emoji) => {
                   await handleReaction(emoji, "block", blockId);
@@ -691,7 +389,7 @@ export function IdeaStudioPanel({
               />
             ) : null}
 
-            {studioTab === "collab" ? (
+            {studioTab === "editor" ? (
               <>
                 <div className="grid gap-3 xl:grid-cols-[1fr_320px]">
                   <div className="space-y-2">
@@ -896,164 +594,8 @@ export function IdeaStudioPanel({
               </div>
             </section>
 
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <p className="font-medium">리액션</p>
-              <div className="flex items-center gap-2">
-                {["👍", "🔥", "🤔", "✅"].map((emoji) => (
-                  <Button key={emoji} variant="outline" size="sm" onClick={() => handleReaction(emoji)} disabled={isReadOnly}>
-                    {emoji}
-                  </Button>
-                ))}
-              </div>
-              <p className="text-sm text-[var(--muted)]">
-                {reactions.reactions.length
-                  ? reactions.reactions.map((item) => `${item.emoji} ${item.count}`).join(" | ")
-                  : "리액션 없음"}
-              </p>
-            </section>
-
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <p className="font-medium">투표</p>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "approve")} disabled={isReadOnly}>
-                  찬성
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "reject")} disabled={isReadOnly}>
-                  반대
-                </Button>
-                {[1, 2, 3, 4, 5].map((score) => (
-                  <Button key={score} variant="outline" size="sm" onClick={() => handleVote("score", score)} disabled={isReadOnly}>
-                    {score}
-                  </Button>
-                ))}
-              </div>
-              <p className="text-sm text-[var(--muted)]">{`찬성 ${votes.binary.approve} / 반대 ${votes.binary.reject}`}</p>
-              <p className="text-sm text-[var(--muted)]">{`평균 ${votes.score.average} (${votes.score.total}명)`}</p>
-            </section>
-
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="font-medium text-[var(--foreground)]">토론 스레드</p>
-                </div>
-                <Button type="button" size="sm" onClick={() => setThreadDrawerOpen(true)}>
-                  스레드 패널 열기
-                </Button>
-              </div>
-              <div className="flex flex-wrap gap-1">
-                <Badge>{`전체 ${threads.length}`}</Badge>
-                <Badge>{`진행 ${threadStatusCounts.active}`}</Badge>
-                <Badge>{`해결 ${threadStatusCounts.resolved}`}</Badge>
-                <Badge>{`보류 ${threadStatusCounts.on_hold}`}</Badge>
-              </div>
-              <p className="text-xs text-[var(--muted)]">
-                {selectedThread ? `현재 선택: ${selectedThread.title}` : "현재 선택된 스레드가 없습니다."}
-              </p>
-            </section>
-
                   </div>
-
-                  <aside className="space-y-2 xl:sticky xl:top-20">
-                    <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-medium text-[var(--foreground)]">AI 어시스턴트</p>
-                        <Badge>{assistantBusy ? "응답 중" : "대화"}</Badge>
-                      </div>
-                      <div className="max-h-80 space-y-2 overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                        {assistantMessages.length ? (
-                          assistantMessages.map((message) => (
-                            <div
-                              key={message.id}
-                              className={`rounded-md px-2 py-1.5 text-xs whitespace-pre-wrap ${message.role === "assistant" ? "bg-[var(--surface-strong)] text-[var(--foreground)]" : "bg-[var(--accent)]/10 text-[var(--foreground)]"}`}
-                            >
-                              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
-                                {message.role === "assistant" ? "assistant" : "you"}
-                              </p>
-                              <p>{message.content}</p>
-                            </div>
-                          ))
-                        ) : (
-                          <p className="text-xs text-[var(--muted)]">대화를 시작해보세요.</p>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {quickAssistantPrompts.map((prompt) => (
-                          <button
-                            key={`assistant-prompt-${prompt}`}
-                            type="button"
-                            className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-[11px] text-[var(--muted)] hover:text-[var(--foreground)]"
-                            onClick={() => sendAssistantPrompt(prompt)}
-                          >
-                            {prompt}
-                          </button>
-                        ))}
-                      </div>
-                      <form
-                        className="flex gap-2"
-                        onSubmit={async (event) => {
-                          event.preventDefault();
-                          await sendAssistantPrompt(assistantDraft);
-                        }}
-                      >
-                        <Input
-                          value={assistantDraft}
-                          onChange={(event) => setAssistantDraft(event.target.value)}
-                          placeholder="질문 또는 요청"
-                        />
-                        <Button type="submit" size="sm" disabled={assistantBusy || !assistantDraft.trim()}>
-                          <Bot className="h-3.5 w-3.5" />
-                        </Button>
-                      </form>
-                    </section>
-                  </aside>
                 </div>
-
-            <ThreadWorkflowDrawer
-              open={threadDrawerOpen}
-              onClose={() => setThreadDrawerOpen(false)}
-              threads={threads}
-              threadStatusCounts={threadStatusCounts}
-              threadListFilter={threadListFilter}
-              setThreadListFilter={setThreadListFilter}
-              visibleThreads={visibleThreads}
-              THREAD_STATUS={THREAD_STATUS}
-              handleCreateThread={handleCreateThread}
-              threadForm={threadForm}
-              setThreadForm={setThreadForm}
-              selectedThreadId={selectedThreadId}
-              setSelectedThreadId={setSelectedThreadId}
-              syncThreadEditor={syncThreadEditor}
-              selectedIdeaId={selectedIdeaId}
-              api={api}
-              setThreadComments={setThreadComments}
-              selectedThread={selectedThread}
-              handleUpdateThread={handleUpdateThread}
-              threadEdit={threadEdit}
-              setThreadEdit={setThreadEdit}
-              handleAddThreadComment={handleAddThreadComment}
-              threadCommentDraft={threadCommentDraft}
-              setThreadCommentDraft={setThreadCommentDraft}
-              threadMentionMatches={threadMentionMatches}
-              activeThreadMentionIndex={activeThreadMentionIndex}
-              setThreadMentionIndex={setThreadMentionIndex}
-              applyMention={applyMention}
-              threadMentionPreview={threadMentionPreview}
-              removeMention={removeMention}
-              threadMentionAnnouncement={threadMentionAnnouncement}
-              threadMentionStatusId={threadMentionStatusId}
-              threadMentionListboxId={threadMentionListboxId}
-              activeThreadMentionOptionId={activeThreadMentionOptionId}
-              handleMentionKeyDown={handleMentionKeyDown}
-              threadComments={threadComments}
-              formatTime={formatTime}
-              currentUserId={currentUserId}
-              myRole={myRole}
-              canEditIdea={canEditIdea}
-              handleUpdateThreadComment={handleUpdateThreadComment}
-              handleDeleteThreadComment={handleDeleteThreadComment}
-              reactionsByTarget={reactionsByTarget}
-              handleReaction={handleReaction}
-            />
               </>
             ) : null}
 
@@ -1181,7 +723,7 @@ export function IdeaStudioPanel({
                 type="button"
                 disabled={restoreBusy}
                 onClick={async () => {
-                  if (!selectedIdeaId) {
+                  if (!selectedIdea?.id) {
                     return;
                   }
                   setRestoreBusy(true);

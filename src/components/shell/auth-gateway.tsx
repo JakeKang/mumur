@@ -53,7 +53,6 @@ export function AuthGateway({
             <Button variant={authMode === "login" ? "default" : "outline"} size="sm" onClick={() => setAuthMode("login")}>로그인</Button>
             <Button variant={authMode === "register" ? "default" : "outline"} size="sm" onClick={() => setAuthMode("register")}>회원가입</Button>
           </div>
-          <p className="text-xs text-[var(--muted)]">테스트 계정: localtester@mumur.local / mumur1234!</p>
         </CardHeader>
         <CardContent>
           {authMode === "login" ? (

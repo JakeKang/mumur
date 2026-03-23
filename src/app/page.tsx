@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AuthGateway } from "@/components/shell/auth-gateway";
 import { ContextPanel } from "@/components/shell/context-panel";
 import { IdeaCreateDialog } from "@/components/shell/idea-create-dialog";
 import { IdeaStudioPanel } from "@/components/shell/idea-studio-panel";
@@ -11,25 +10,26 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GROWTH_PRESET_STATUSES, IDEA_STATUS, STATUS_META } from "@/lib/idea-status";
 import { dequeueIdeaSync, enqueueIdeaSync, listIdeaSyncQueue, loadIdeaDraft, removeIdeaDraft, saveIdeaDraft } from "@/lib/local-first";
 import type { WorkspaceMe, WorkspaceRole } from "@/types";
+import { AlertCircle, Bell, Check, Loader2, LogOut, Plus, RefreshCw } from "lucide-react";
 
-const THREAD_STATUS = ["active", "resolved", "on_hold"];
-const DEFAULT_VOTES = {
-  binary: { approve: 0, reject: 0, total: 0 },
-  score: { average: 0, total: 0, distribution: [1, 2, 3, 4, 5].map((score) => ({ score, count: 0 })) },
-  mine: { binary: null, score: null }
-};
 const NOTIFICATION_TYPES = [
   "mention.created",
   "comment.created",
-  "thread.created",
-  "thread.comment.created",
-  "vote.created",
   "version.created",
   "version.restored",
   "integration.webhook.updated"
 ];
 
 type LocalSyncState = "synced" | "pending" | "syncing" | "failed";
+
+class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function api(path: string, options: RequestInit = {}) {
   const response = await fetch(path, {
@@ -43,7 +43,7 @@ async function api(path: string, options: RequestInit = {}) {
 
   const json = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(json.error || "요청 처리에 실패했습니다");
+    throw new ApiError(json.error || "요청 처리에 실패했습니다", response.status);
   }
   return json;
 }
@@ -76,32 +76,21 @@ function toMillisFromDateInput(value: string, endOfDay = false) {
 
 function syncStateLabel(state: LocalSyncState) {
   if (state === "pending") {
-    return "로컬 저장 대기";
+    return "저장 대기";
   }
   if (state === "syncing") {
-    return "동기화 중";
+    return "저장 중...";
   }
   if (state === "failed") {
-    return "동기화 실패";
+    return "저장 실패";
   }
-  return "동기화 완료";
-}
-
-function dedupePresenceUsers(users: Array<{ userId: number; name?: string }>) {
-  const map = new Map<number, { userId: number; name: string }>();
-  users.forEach((user) => {
-    const userId = Number(user?.userId);
-    if (!Number.isInteger(userId) || userId <= 0) {
-      return;
-    }
-    map.set(userId, { userId, name: String(user?.name || "사용자") });
-  });
-  return Array.from(map.values());
+  return "저장됨";
 }
 
 export default function HomePage() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
+  const [authChecked, setAuthChecked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
   const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
@@ -112,7 +101,7 @@ export default function HomePage() {
   const [session, setSession] = useState(null);
   const [dashboard, setDashboard] = useState(null);
 
-  const [loginForm, setLoginForm] = useState({ email: "localtester@mumur.local", password: "mumur1234!" });
+  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [registerForm, setRegisterForm] = useState({ name: "", email: "", password: "", teamName: "" });
 
   const [filters, setFilters] = useState({
@@ -137,6 +126,7 @@ export default function HomePage() {
   const [ideas, setIdeas] = useState([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState(null);
   const [selectedIdea, setSelectedIdea] = useState(null);
+  const [detailNotFound, setDetailNotFound] = useState<{ ideaId: string; message: string } | null>(null);
 
   const [comments, setComments] = useState([]);
   const [commentDraft, setCommentDraft] = useState("");
@@ -145,14 +135,6 @@ export default function HomePage() {
 
   const [reactions, setReactions] = useState({ reactions: [], mine: [] });
   const [reactionsByTarget, setReactionsByTarget] = useState<Record<string, { reactions: Array<{ emoji: string; count: number }>; mine: string[] }>>({});
-  const [votes, setVotes] = useState(DEFAULT_VOTES);
-
-  const [threads, setThreads] = useState([]);
-  const [selectedThreadId, setSelectedThreadId] = useState(null);
-  const [threadForm, setThreadForm] = useState({ title: "", description: "", status: "active" });
-  const [threadEdit, setThreadEdit] = useState({ title: "", description: "", status: "active", conclusion: "" });
-  const [threadComments, setThreadComments] = useState([]);
-  const [threadCommentDraft, setThreadCommentDraft] = useState("");
 
   const [versions, setVersions] = useState([]);
   const [versionForm, setVersionForm] = useState({ versionLabel: "", notes: "" });
@@ -161,9 +143,7 @@ export default function HomePage() {
 
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [, setStreamStatus] = useState("offline");
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
-  const [utilitySection, setUtilitySection] = useState("notifications");
   const [notificationFilters, setNotificationFilters] = useState({
     eventType: "",
     unreadOnly: false,
@@ -173,12 +153,10 @@ export default function HomePage() {
   const [mutedTypes, setMutedTypes] = useState([]);
 
   const [webhooks, setWebhooks] = useState([]);
-  const [deliveries, setDeliveries] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
   const [userTeams, setUserTeams] = useState([]);
   const [teamMemberForm, setTeamMemberForm] = useState({ email: "", role: "editor" });
   const [teamMe, setTeamMe] = useState<WorkspaceMe>({ userId: null, isOwner: false, role: null });
-  const [presenceUsers, setPresenceUsers] = useState<Array<{ userId: number; name: string }>>([]);
   const [teamInvitations, setTeamInvitations] = useState([]);
   const [teamInvitationMessage, setTeamInvitationMessage] = useState("");
   const [webhookForm, setWebhookForm] = useState({ platform: "slack", webhookUrl: "", enabled: false });
@@ -191,6 +169,8 @@ export default function HomePage() {
     action: null
   });
   const [localSyncState, setLocalSyncState] = useState<LocalSyncState>("synced");
+  const [syncBadgeVisible, setSyncBadgeVisible] = useState(false);
+  const [syncBadgeFading, setSyncBadgeFading] = useState(false);
 
   const streamRef = useRef(null);
   const reconnectTimerRef = useRef(null);
@@ -200,7 +180,6 @@ export default function HomePage() {
 
   const authed = useMemo(() => Boolean(session?.user), [session]);
   const activeWorkspaceId = Number(session?.workspace?.id) || null;
-  const selectedThread = useMemo(() => threads.find((item) => item.id === selectedThreadId) || null, [threads, selectedThreadId]);
 
   const sortedIdeas = useMemo(() => {
     const next = [...ideas];
@@ -225,7 +204,7 @@ export default function HomePage() {
       return sortedIdeas.filter((idea) => Number(idea.updatedAt || 0) >= start.getTime());
     }
     if (navigatorPreset === "discussion") {
-      return sortedIdeas.filter((idea) => Number(idea.commentCount || 0) > 0 || Number(idea.threadCount || 0) > 0);
+      return sortedIdeas.filter((idea) => Number(idea.commentCount || 0) > 0);
     }
     if (navigatorPreset === "growth") {
       return sortedIdeas.filter((idea) => GROWTH_PRESET_STATUSES.includes(idea.status));
@@ -239,7 +218,7 @@ export default function HomePage() {
     return {
       all: sortedIdeas.length,
       updatedToday: sortedIdeas.filter((idea) => Number(idea.updatedAt || 0) >= start.getTime()).length,
-      discussion: sortedIdeas.filter((idea) => Number(idea.commentCount || 0) > 0 || Number(idea.threadCount || 0) > 0).length,
+      discussion: sortedIdeas.filter((idea) => Number(idea.commentCount || 0) > 0).length,
       growth: sortedIdeas.filter((idea) => GROWTH_PRESET_STATUSES.includes(idea.status)).length
     };
   }, [sortedIdeas]);
@@ -301,22 +280,6 @@ export default function HomePage() {
     });
   }, [presetIdeas, filters]);
 
-  const syncThreadEditor = useCallback(
-    (thread) => {
-      if (!thread) {
-        setThreadEdit({ title: "", description: "", status: "active", conclusion: "" });
-        return;
-      }
-      setThreadEdit({
-        title: thread.title || "",
-        description: thread.description || "",
-        status: thread.status || "active",
-        conclusion: thread.conclusion || ""
-      });
-    },
-    []
-  );
-
   const disconnectStream = useCallback(() => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -327,8 +290,6 @@ export default function HomePage() {
       streamRef.current = null;
     }
     reconnectTryRef.current = 0;
-    setStreamStatus("offline");
-    setPresenceUsers([]);
   }, []);
 
   const pushNotification = useCallback((notification) => {
@@ -359,7 +320,6 @@ export default function HomePage() {
 
       source.addEventListener("connected", () => {
         reconnectTryRef.current = 0;
-        setStreamStatus("online");
       });
 
       source.addEventListener("notification", (event) => {
@@ -367,35 +327,7 @@ export default function HomePage() {
         pushNotification(payload);
       });
 
-      source.addEventListener("presence", (event) => {
-        const payload = JSON.parse(event.data || "{}");
-        const eventType = String(payload?.type || "");
-        if (eventType === "snapshot") {
-          const users = Array.isArray(payload?.users) ? payload.users : [];
-          setPresenceUsers(dedupePresenceUsers(users));
-          return;
-        }
-
-        const incoming = {
-          userId: Number(payload?.userId),
-          name: String(payload?.name || "사용자")
-        };
-        if (!Number.isInteger(incoming.userId) || incoming.userId <= 0) {
-          return;
-        }
-
-        if (eventType === "user.joined") {
-          setPresenceUsers((prev) => dedupePresenceUsers([...prev, incoming]));
-          return;
-        }
-
-        if (eventType === "user.left") {
-          setPresenceUsers((prev) => prev.filter((item) => item.userId !== incoming.userId));
-        }
-      });
-
       source.onerror = () => {
-        setStreamStatus("offline");
         if (streamRef.current) {
           streamRef.current.close();
           streamRef.current = null;
@@ -445,12 +377,8 @@ export default function HomePage() {
   }, []);
 
   const loadWebhooks = useCallback(async () => {
-    const [webhookRes, deliveryRes] = await Promise.all([
-      api("/api/integrations/webhooks"),
-      api("/api/integrations/webhooks/deliveries")
-    ]);
+    const webhookRes = await api("/api/integrations/webhooks");
     setWebhooks(webhookRes.webhooks || []);
-    setDeliveries(deliveryRes.deliveries || []);
   }, []);
 
   const loadTeamMembers = useCallback(async () => {
@@ -642,58 +570,31 @@ export default function HomePage() {
     async (ideaId, blockList: Array<{ id?: string }> | null = null) => {
       const commentsQuery = commentFilterBlockId ? `?blockId=${encodeURIComponent(commentFilterBlockId)}` : "";
 
-      const [commentRes, reactionRes, versionRes, timelineRes, threadRes, voteRes] = await Promise.all([
+      const [commentRes, reactionRes, versionRes, timelineRes] = await Promise.all([
         api(`/api/ideas/${ideaId}/comments${commentsQuery}`),
         api(`/api/ideas/${ideaId}/reactions`),
         api(`/api/ideas/${ideaId}/versions`),
-        api(`/api/ideas/${ideaId}/timeline`),
-        api(`/api/ideas/${ideaId}/threads`),
-        api(`/api/ideas/${ideaId}/votes`)
+        api(`/api/ideas/${ideaId}/timeline`)
       ]);
 
       setComments(commentRes.comments || []);
       setReactions(reactionRes || { reactions: [], mine: [] });
       setVersions(versionRes.versions || []);
       setTimeline(timelineRes.timeline || []);
-      const nextThreads = threadRes.threads || [];
-      setThreads(nextThreads);
-      setVotes(voteRes.votes || DEFAULT_VOTES);
 
       const blockTargets = (blockList || selectedIdea?.blocks || [])
         .map((block) => String(block?.id || ""))
         .filter(Boolean)
         .map((targetId) => ({ targetType: "block", targetId }));
-
-      if (nextThreads.length) {
-        const nextId = nextThreads.some((item) => item.id === selectedThreadId) ? selectedThreadId : nextThreads[0].id;
-        setSelectedThreadId(nextId);
-        const detail = nextThreads.find((item) => item.id === nextId) || null;
-        syncThreadEditor(detail);
-        const threadCommentRes = await api(`/api/ideas/${ideaId}/threads/${nextId}/comments`);
-        const nextThreadComments = threadCommentRes.comments || [];
-        setThreadComments(nextThreadComments);
-        await loadReactionTargets(
-          ideaId,
-          [
-            ...blockTargets,
-            ...(commentRes.comments || []).map((comment) => ({ targetType: "comment", targetId: `idea:${comment.id}` })),
-            ...nextThreadComments.map((comment) => ({ targetType: "comment", targetId: `thread:${comment.id}` }))
-          ]
-        );
-      } else {
-        setSelectedThreadId(null);
-        setThreadComments([]);
-        syncThreadEditor(null);
-        await loadReactionTargets(
-          ideaId,
-          [
-            ...blockTargets,
-            ...(commentRes.comments || []).map((comment) => ({ targetType: "comment", targetId: `idea:${comment.id}` }))
-          ]
-        );
-      }
+      await loadReactionTargets(
+        ideaId,
+        [
+          ...blockTargets,
+          ...(commentRes.comments || []).map((comment) => ({ targetType: "comment", targetId: `idea:${comment.id}` }))
+        ]
+      );
     },
-    [commentFilterBlockId, loadReactionTargets, selectedIdea?.blocks, selectedThreadId, syncThreadEditor]
+    [commentFilterBlockId, loadReactionTargets, selectedIdea?.blocks]
   );
 
   const selectIdea = useCallback(
@@ -726,7 +627,31 @@ export default function HomePage() {
           loadIdeas(filters)
         ]);
       }
-      const data = await api(`/api/ideas/${ideaId}`);
+      let data: any;
+      try {
+        data = await api(`/api/ideas/${ideaId}`);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          const targetId = String(ideaId);
+          setSelectedIdeaId(targetId);
+          setSelectedIdea(null);
+          setComments([]);
+          setVersions([]);
+          setTimeline([]);
+          setDetailNotFound({ ideaId: targetId, message: err.message || "아이디어를 찾을 수 없습니다" });
+          if (options.openPage !== false) {
+            setActivePage("detail");
+          }
+          if (options.syncUrl !== false && typeof window !== "undefined") {
+            const params = new URLSearchParams(window.location.search);
+            params.set("idea", targetId);
+            window.history.replaceState(null, "", `?${params.toString()}`);
+          }
+          return;
+        }
+        throw err;
+      }
+      setDetailNotFound(null);
       try {
         const draft = await loadIdeaDraft(Number(ideaId));
         if (draft && Number(draft.updatedAt || 0) > Number(data.idea.updatedAt || 0)) {
@@ -777,26 +702,53 @@ export default function HomePage() {
       const loadedIdeas = await loadIdeas();
       if (loadedIdeas.length) {
         const requestedIdea = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("idea") : null;
-        const requestedExists = requestedIdea && loadedIdeas.some((item) => String(item.id) === String(requestedIdea));
-        const nextIdeaId = requestedExists ? requestedIdea : loadedIdeas[0].id;
-        await selectIdea(nextIdeaId, { syncUrl: !requestedExists, openPage: Boolean(requestedExists) });
+        if (requestedIdea) {
+          const requestedExists = loadedIdeas.some((item) => String(item.id) === String(requestedIdea));
+          if (requestedExists) {
+            await selectIdea(requestedIdea, { syncUrl: false, openPage: true });
+          } else {
+            setSelectedIdeaId(String(requestedIdea));
+            setSelectedIdea(null);
+            setComments([]);
+            setVersions([]);
+            setTimeline([]);
+            setDetailNotFound({ ideaId: String(requestedIdea), message: "아이디어를 찾을 수 없습니다" });
+            setActivePage("detail");
+          }
+        } else {
+          await selectIdea(loadedIdeas[0].id, { syncUrl: false, openPage: false });
+          setDetailNotFound(null);
+        }
       } else {
+        const requestedIdea = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("idea") : null;
         setSelectedIdeaId(null);
         setSelectedIdea(null);
         setComments([]);
-        setThreads([]);
-        setThreadComments([]);
         setVersions([]);
         setTimeline([]);
+        if (requestedIdea) {
+          setSelectedIdeaId(String(requestedIdea));
+          setDetailNotFound({ ideaId: String(requestedIdea), message: "아이디어를 찾을 수 없습니다" });
+          setActivePage("detail");
+        } else {
+          setDetailNotFound(null);
+        }
       }
       setError("");
+      setAuthChecked(true);
     } catch (err) {
-      setSession(null);
-      setIdeas([]);
-      setSelectedIdea(null);
-      setSelectedIdeaId(null);
-      setError(err.message || "로그인이 필요합니다");
-      disconnectStream();
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        setIdeas([]);
+        setSelectedIdea(null);
+        setSelectedIdeaId(null);
+        setDetailNotFound(null);
+        setError(err.message || "로그인이 필요합니다");
+        disconnectStream();
+      } else {
+        setError(err instanceof Error ? err.message : "요청 처리에 실패했습니다");
+      }
+      setAuthChecked(true);
     }
   }, [
     disconnectStream,
@@ -850,8 +802,13 @@ export default function HomePage() {
       }
       const exists = ideas.some((item) => String(item.id) === String(requestedIdea));
       if (!exists) {
+        setSelectedIdeaId(String(requestedIdea));
+        setSelectedIdea(null);
+        setDetailNotFound({ ideaId: String(requestedIdea), message: "아이디어를 찾을 수 없습니다" });
+        setActivePage("detail");
         return;
       }
+      setDetailNotFound(null);
       selectIdea(requestedIdea, { syncUrl: false });
     };
 
@@ -868,6 +825,13 @@ export default function HomePage() {
     }
     void loadIdeas(filters);
   }, [authed, filters, loadIdeas]);
+
+  useEffect(() => {
+    if (!authChecked || authed || typeof window === "undefined") {
+      return;
+    }
+    window.location.replace("/login");
+  }, [authChecked, authed]);
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -909,11 +873,11 @@ export default function HomePage() {
       setIdeas([]);
       setSelectedIdea(null);
       setSelectedIdeaId(null);
+      setDetailNotFound(null);
       setCreateIdeaDialogOpen(false);
       setTeamMembers([]);
       setUserTeams([]);
       setTeamMe({ userId: null, isOwner: false, role: null });
-      setPresenceUsers([]);
       setTeamInvitations([]);
       setTeamInvitationMessage("");
       setNotifications([]);
@@ -1174,122 +1138,6 @@ export default function HomePage() {
     }
   };
 
-  const handleVote = async (voteType, value) => {
-    if (!selectedIdeaId) {
-      return;
-    }
-    try {
-      const data = await api(`/api/ideas/${selectedIdeaId}/votes`, {
-        method: "POST",
-        body: JSON.stringify({ voteType, value })
-      });
-      setVotes(data.votes);
-      await loadIdeas();
-    } catch (err) {
-      setError(err.message || "투표 처리에 실패했습니다");
-    }
-  };
-
-  const handleCreateThread = async (event) => {
-    event.preventDefault();
-    if (!selectedIdeaId || !threadForm.title.trim()) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/ideas/${selectedIdeaId}/threads`, {
-        method: "POST",
-        body: JSON.stringify(threadForm)
-      });
-      setThreadForm({ title: "", description: "", status: "active" });
-      await loadIdeaChildren(selectedIdeaId);
-    } catch (err) {
-      setError(err.message || "스레드 생성에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleUpdateThread = async (event) => {
-    event.preventDefault();
-    if (!selectedIdeaId || !selectedThreadId) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}`, {
-        method: "PUT",
-        body: JSON.stringify(threadEdit)
-      });
-      await loadIdeaChildren(selectedIdeaId);
-    } catch (err) {
-      setError(err.message || "스레드 수정에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleAddThreadComment = async (event) => {
-    event.preventDefault();
-    if (!selectedIdeaId || !selectedThreadId || !threadCommentDraft.trim()) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`, {
-        method: "POST",
-        body: JSON.stringify({ content: threadCommentDraft })
-      });
-      setThreadCommentDraft("");
-      const res = await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`);
-      setThreadComments(res.comments || []);
-      await loadIdeaChildren(selectedIdeaId);
-    } catch (err) {
-      setError(err.message || "스레드 댓글 등록에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleUpdateThreadComment = async (commentId, content) => {
-    if (!selectedIdeaId || !selectedThreadId) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments/${commentId}`, {
-        method: "PUT",
-        body: JSON.stringify({ content })
-      });
-      const res = await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`);
-      setThreadComments(res.comments || []);
-      await loadIdeaChildren(selectedIdeaId);
-    } catch (err) {
-      setError(err.message || "스레드 댓글 수정에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleDeleteThreadComment = async (commentId) => {
-    if (!selectedIdeaId || !selectedThreadId) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments/${commentId}`, {
-        method: "DELETE"
-      });
-      const res = await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`);
-      setThreadComments(res.comments || []);
-      await loadIdeaChildren(selectedIdeaId);
-    } catch (err) {
-      setError(err.message || "스레드 댓글 삭제에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleUploadBlockFile = async (blockId, file) => {
     if (!selectedIdeaId) {
       throw new Error("아이디어를 찾을 수 없습니다");
@@ -1450,9 +1298,8 @@ export default function HomePage() {
       setActivePage("ideas");
       setSelectedIdeaId(null);
       setSelectedIdea(null);
+      setDetailNotFound(null);
       setComments([]);
-      setThreads([]);
-      setThreadComments([]);
       setVersions([]);
       setTimeline([]);
       await api("/api/workspaces/switch", {
@@ -1498,6 +1345,7 @@ export default function HomePage() {
   const backToIdeas = () => {
     setSelectedIdeaId(null);
     setSelectedIdea(null);
+    setDetailNotFound(null);
     setStudioTab("editor");
     setActivePage("ideas");
     if (typeof window !== "undefined") {
@@ -1525,6 +1373,7 @@ export default function HomePage() {
 
       setSelectedIdeaId(null);
       setSelectedIdea(null);
+      setDetailNotFound(null);
       setStudioTab("editor");
       if (typeof window !== "undefined") {
         const params = new URLSearchParams(window.location.search);
@@ -1543,9 +1392,8 @@ export default function HomePage() {
     }
   }, [activePage, selectedIdeaId]);
 
-  const openUtilityPanel = useCallback((event, section = "notifications") => {
+  const openUtilityPanel = useCallback((event) => {
     utilityTriggerRef.current = event.currentTarget;
-    setUtilitySection(section);
     setNotificationPanelOpen(true);
   }, []);
 
@@ -1580,26 +1428,33 @@ export default function HomePage() {
     return () => window.cancelAnimationFrame(raf);
   }, [activePage, selectedIdeaId, studioTab]);
 
+  useEffect(() => {
+    if (localSyncState !== "synced") {
+      setSyncBadgeVisible(true);
+      setSyncBadgeFading(false);
+      return;
+    }
+    setSyncBadgeVisible(true);
+    setSyncBadgeFading(false);
+    const fadeTimer = window.setTimeout(() => setSyncBadgeFading(true), 3000);
+    const hideTimer = window.setTimeout(() => {
+      setSyncBadgeVisible(false);
+      setSyncBadgeFading(false);
+    }, 3600);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(hideTimer);
+    };
+  }, [localSyncState]);
+
   const blocks = selectedIdea?.blocks || [];
   const canEditIdea = Boolean(teamMe.role) && teamMe.role !== "viewer";
+  const shouldShowSyncBadge = syncBadgeVisible;
 
   return (
     <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
       {!authed ? (
-        <div className="mx-auto max-w-5xl p-4 md:p-6">
-          <AuthGateway
-            authMode={authMode}
-            setAuthMode={setAuthMode}
-            busy={busy}
-            loginForm={loginForm}
-            setLoginForm={setLoginForm}
-            registerForm={registerForm}
-            setRegisterForm={setRegisterForm}
-            handleLogin={handleLogin}
-            handleRegister={handleRegister}
-            error={error}
-          />
-        </div>
+        <div className="mx-auto max-w-3xl p-8 text-sm text-[var(--muted)]">로그인 상태를 확인하는 중입니다...</div>
       ) : (
         <>
           <div className="relative flex h-screen overflow-hidden bg-[var(--surface)]">
@@ -1659,7 +1514,14 @@ export default function HomePage() {
             <section className="flex-1 overflow-auto">
               <div className="mx-auto w-full max-w-6xl px-4 pt-14 pb-7 md:px-10 md:pt-7">
                 <div className="mb-5 flex flex-wrap items-center gap-2">
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`동기화 ${syncStateLabel(localSyncState)}`}</span>
+                  {shouldShowSyncBadge ? (
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs transition-opacity duration-500 ${localSyncState === "failed" ? "text-rose-600" : localSyncState === "syncing" ? "text-sky-600" : "text-[var(--muted)]"} ${syncBadgeFading ? "opacity-0" : "opacity-100"}`}
+                    >
+                      {localSyncState === "failed" ? <AlertCircle className="h-3.5 w-3.5" /> : localSyncState === "syncing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                      {syncStateLabel(localSyncState)}
+                    </span>
+                  ) : null}
                   {workspaceSwitching ? (
                     <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">워크스페이스 전환 중...</span>
                   ) : null}
@@ -1668,46 +1530,42 @@ export default function HomePage() {
                       type="button"
                       onClick={() => setCreateIdeaDialogOpen(true)}
                       disabled={!canEditIdea}
-                      className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white"
+                      className="inline-flex items-center gap-1 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white"
                       title={canEditIdea ? "새 아이디어" : "viewer 권한에서는 아이디어를 생성할 수 없습니다"}
+                      aria-label="새 아이디어"
                     >
-                      + 새 아이디어
+                      <Plus className="h-3.5 w-3.5" />
+                      새 아이디어
                     </button>
                     <button
                       type="button"
                       onClick={refreshAll}
-                      className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--foreground)]"
+                      className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--foreground)]"
+                      aria-label="새로고침"
                     >
+                      <RefreshCw className="h-3.5 w-3.5" />
                       새로고침
                     </button>
+                    <span className="mx-1 h-4 w-px bg-[var(--border)]" aria-hidden="true" />
                     <div className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-1">
                       <button
                         type="button"
-                        onClick={(event) => openUtilityPanel(event, "notifications")}
-                        className={`rounded px-2 py-1 text-xs ${notificationPanelOpen && utilitySection === "notifications" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"}`}
+                        onClick={(event) => openUtilityPanel(event)}
+                        className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${notificationPanelOpen ? "bg-[var(--surface)] font-semibold text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"}`}
+                        aria-label="알림 패널 열기"
                       >
-                        {`알림 ${unreadCount > 0 ? unreadCount : ""}`}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(event) => openUtilityPanel(event, "team")}
-                        className={`rounded px-2 py-1 text-xs ${notificationPanelOpen && utilitySection === "team" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"}`}
-                      >
-                        팀
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(event) => openUtilityPanel(event, "integrations")}
-                        className={`rounded px-2 py-1 text-xs ${notificationPanelOpen && utilitySection === "integrations" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"}`}
-                      >
-                        연동
+                        <Bell className="h-3.5 w-3.5" />
+                        {`알림${unreadCount > 0 ? ` ${unreadCount}` : ""}`}
                       </button>
                     </div>
+                    <span className="mx-1 h-4 w-px bg-[var(--border)]" aria-hidden="true" />
                     <button
                       type="button"
                       onClick={handleLogout}
-                      className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--foreground)]"
+                      className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--foreground)]"
+                      aria-label="로그아웃"
                     >
+                      <LogOut className="h-3.5 w-3.5" />
                       로그아웃
                     </button>
                   </div>
@@ -1751,66 +1609,56 @@ export default function HomePage() {
                 ) : null}
 
                 {activePage === "detail" ? (
-                  <IdeaStudioPanel
-                    selectedIdea={selectedIdea}
-                    onBackToList={backToIdeas}
-                    studioTab={studioTab}
-                    setStudioTab={setStudioTab}
-                    STATUS_META={STATUS_META}
-                    handleSaveIdea={handleSaveIdea}
-                    updateSelectedIdeaField={updateSelectedIdeaField}
-                    blocks={blocks}
-                    setCommentBlockId={setCommentBlockId}
-                    commentDraft={commentDraft}
-                    setCommentDraft={setCommentDraft}
-                    handleCreateComment={handleCreateComment}
-                    handleUpdateComment={handleUpdateComment}
-                    handleDeleteComment={handleDeleteComment}
-                    commentBlockId={commentBlockId}
-                    comments={comments}
-                    commentFilterBlockId={commentFilterBlockId}
-                    setCommentFilterBlockId={setCommentFilterBlockId}
-                    applyCommentFilter={applyCommentFilter}
-                    reactions={reactions}
-                    reactionsByTarget={reactionsByTarget}
-                    handleReaction={handleReaction}
-                    votes={votes}
-                    handleVote={handleVote}
-                    handleCreateThread={handleCreateThread}
-                    threadForm={threadForm}
-                    setThreadForm={setThreadForm}
-                    THREAD_STATUS={THREAD_STATUS}
-                    threads={threads}
-                    selectedThreadId={selectedThreadId}
-                    setSelectedThreadId={setSelectedThreadId}
-                    syncThreadEditor={syncThreadEditor}
-                    selectedIdeaId={selectedIdeaId}
-                    api={api}
-                    setThreadComments={setThreadComments}
-                    selectedThread={selectedThread}
-                    handleUpdateThread={handleUpdateThread}
-                    threadEdit={threadEdit}
-                    setThreadEdit={setThreadEdit}
-                    handleAddThreadComment={handleAddThreadComment}
-                    threadCommentDraft={threadCommentDraft}
-                    setThreadCommentDraft={setThreadCommentDraft}
-                    threadComments={threadComments}
-                    formatTime={formatTime}
-                    handleCreateVersion={handleCreateVersion}
-                    handleRestoreVersion={handleRestoreVersion}
-                    versionForm={versionForm}
-                    setVersionForm={setVersionForm}
-                    versions={versions}
-                    timeline={timeline}
-                    teamMembers={teamMembers}
-                    presenceUsers={presenceUsers}
-                    myRole={teamMe.role as WorkspaceRole | null}
-                    canEditIdea={canEditIdea}
-                    currentUserId={teamMe.userId}
-                    handleUpdateThreadComment={handleUpdateThreadComment}
-                    handleDeleteThreadComment={handleDeleteThreadComment}
-                    handleUploadBlockFile={handleUploadBlockFile}
-                  />
+                  detailNotFound ? (
+                    <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6">
+                      <p className="text-xs uppercase tracking-wide text-[var(--muted)]">404</p>
+                      <h2 className="mt-1 text-xl font-semibold">아이디어를 찾을 수 없습니다</h2>
+                      <p className="mt-2 text-sm text-[var(--muted)]">요청한 아이디어 ID: {detailNotFound.ideaId}</p>
+                      <p className="mt-1 text-sm text-[var(--muted)]">{detailNotFound.message}</p>
+                      <button
+                        type="button"
+                        className="mt-4 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-1.5 text-sm"
+                        onClick={backToIdeas}
+                      >
+                        목록으로 이동
+                      </button>
+                    </section>
+                  ) : (
+                    <IdeaStudioPanel
+                      selectedIdea={selectedIdea}
+                      onBackToList={backToIdeas}
+                      studioTab={studioTab}
+                      setStudioTab={setStudioTab}
+                      STATUS_META={STATUS_META}
+                      handleSaveIdea={handleSaveIdea}
+                      blocks={blocks}
+                      setCommentBlockId={setCommentBlockId}
+                      commentDraft={commentDraft}
+                      setCommentDraft={setCommentDraft}
+                      handleCreateComment={handleCreateComment}
+                      handleUpdateComment={handleUpdateComment}
+                      handleDeleteComment={handleDeleteComment}
+                      commentBlockId={commentBlockId}
+                      comments={comments}
+                      commentFilterBlockId={commentFilterBlockId}
+                      setCommentFilterBlockId={setCommentFilterBlockId}
+                      applyCommentFilter={applyCommentFilter}
+                      reactionsByTarget={reactionsByTarget}
+                      handleReaction={handleReaction}
+                      formatTime={formatTime}
+                      handleCreateVersion={handleCreateVersion}
+                      handleRestoreVersion={handleRestoreVersion}
+                      versionForm={versionForm}
+                      setVersionForm={setVersionForm}
+                      versions={versions}
+                      timeline={timeline}
+                      teamMembers={teamMembers}
+                      myRole={teamMe.role as WorkspaceRole | null}
+                      canEditIdea={canEditIdea}
+                      currentUserId={teamMe.userId}
+                      handleUploadBlockFile={handleUploadBlockFile}
+                    />
+                  )
                 ) : null}
 
                 {activePage === "team" ? (
@@ -1827,6 +1675,11 @@ export default function HomePage() {
                     requestCancelInvitation={requestCancelInvitation}
                     teamInvitationMessage={teamInvitationMessage}
                     formatTime={formatTime}
+                    webhooks={webhooks}
+                    webhookForm={webhookForm}
+                    setWebhookForm={setWebhookForm}
+                    handleSaveWebhook={handleSaveWebhook}
+                    webhookSaving={busy}
                   />
                 ) : null}
               </div>
@@ -1838,7 +1691,7 @@ export default function HomePage() {
               <button
                 type="button"
                 className="absolute inset-0 h-full w-full bg-slate-950/40"
-                aria-label="유틸리티 패널 닫기"
+                aria-label="알림 패널 닫기"
                 onClick={closeUtilityPanel}
               />
               <div className="absolute right-0 top-0 h-full w-full max-w-xl overflow-auto border-l border-[var(--border)] bg-[var(--surface)] p-4 shadow-2xl">
@@ -1848,8 +1701,6 @@ export default function HomePage() {
                   studioTab={studioTab}
                   setStudioTab={setStudioTab}
                   dashboard={dashboard}
-                  utilitySection={utilitySection}
-                  setUtilitySection={setUtilitySection}
                   onRequestClose={closeUtilityPanel}
                   notificationFilters={notificationFilters}
                   setNotificationFilters={setNotificationFilters}
@@ -1862,22 +1713,6 @@ export default function HomePage() {
                   notifications={notifications}
                   markNotificationRead={markNotificationRead}
                   formatTime={formatTime}
-                  handleSaveWebhook={handleSaveWebhook}
-                  webhookForm={webhookForm}
-                  setWebhookForm={setWebhookForm}
-                  webhooks={webhooks}
-                  deliveries={deliveries}
-                  teamMembers={teamMembers}
-                  userTeams={userTeams}
-                  activeTeamId={session?.workspace?.id || null}
-                  teamMe={teamMe}
-                  onSwitchTeam={handleSwitchTeam}
-                  teamInvitationMessage={teamInvitationMessage}
-                  onLeaveWorkspace={requestLeaveWorkspace}
-                  onOpenTeamPage={() => {
-                    closeUtilityPanel();
-                    setActivePage("team");
-                  }}
                 />
               </div>
             </div>

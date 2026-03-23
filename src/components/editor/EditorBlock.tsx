@@ -1,10 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import Image from "next/image";
-import { marked } from "marked";
-import hljs from "highlight.js";
-import "highlight.js/styles/github.css";
+import { marked, type Tokens } from "marked";
 
 export type BlockType =
   | "paragraph"
@@ -27,15 +25,7 @@ export type EditorBlockData = {
   lang?: string;
 };
 
-const renderer = new marked.Renderer();
-renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-  const language = lang && hljs.getLanguage(lang) ? lang : "plaintext";
-  const highlighted = hljs.highlight(text, { language }).value;
-  return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
-};
-
 marked.use({
-  renderer,
   gfm: true,
   breaks: true,
 });
@@ -74,16 +64,117 @@ export function detectBlockType(
   return null;
 }
 
-function renderMarkdown(content: string): string {
-  if (!content.trim()) return "";
-  return marked.parse(content) as string;
+type InlineToken = Tokens.Generic & {
+  tokens?: InlineToken[];
+  href?: string;
+  title?: string;
+  text?: string;
+  raw?: string;
+};
+
+function inlineTokens(content: string): InlineToken[] {
+  if (!content.trim()) {
+    return [];
+  }
+  const parsed = marked.lexer(content);
+  const first = parsed[0] as InlineToken | undefined;
+  if (first && Array.isArray(first.tokens)) {
+    return first.tokens;
+  }
+  return [
+    {
+      type: "text",
+      raw: content,
+      text: content
+    } as InlineToken
+  ];
+}
+
+function renderInlineToken(token: InlineToken, keyPrefix: string): ReactNode {
+  const text = String(token.text ?? token.raw ?? "");
+  const tokenIdentity = (candidate: InlineToken) => String(candidate.raw ?? candidate.type ?? "");
+  const children = Array.isArray(token.tokens)
+    ? token.tokens.map((child, idx) => renderInlineToken(child as InlineToken, `${keyPrefix}-child-${idx}-${tokenIdentity(child as InlineToken)}`))
+    : text;
+
+  if (token.type === "strong") {
+    return <strong key={keyPrefix}>{children}</strong>;
+  }
+  if (token.type === "em") {
+    return <em key={keyPrefix}>{children}</em>;
+  }
+  if (token.type === "del") {
+    return <del key={keyPrefix}>{children}</del>;
+  }
+  if (token.type === "codespan") {
+    return (
+      <code key={keyPrefix} className="rounded bg-[var(--surface-strong)] px-1 text-xs">
+        {text}
+      </code>
+    );
+  }
+  if (token.type === "link") {
+    const href = sanitizeLinkHref(String(token.href || ""));
+    if (!href) {
+      return <span key={keyPrefix}>{children}</span>;
+    }
+    return (
+      <a key={keyPrefix} href={href} target="_blank" rel="noreferrer" className="underline">
+        {children}
+      </a>
+    );
+  }
+  if (token.type === "br") {
+    return <br key={keyPrefix} />;
+  }
+  return <span key={keyPrefix}>{text}</span>;
+}
+
+function toStableLineEntries(lines: string[]) {
+  const counts = new Map<string, number>();
+  return lines.map((line) => {
+    const keyBase = line || "__empty__";
+    const count = (counts.get(keyBase) || 0) + 1;
+    counts.set(keyBase, count);
+    return {
+      line,
+      key: `${keyBase}-${count}`
+    };
+  });
+}
+
+function renderInline(tokens: InlineToken[], muted?: boolean): ReactNode {
+  return (
+    <span className={muted ? "text-[var(--muted)]" : undefined}>
+      {tokens.length
+        ? tokens.map((token, idx) =>
+            renderInlineToken(token, `inline-${idx}-${String(token.raw ?? token.type ?? "")}`)
+          )
+        : "\u00A0"}
+    </span>
+  );
+}
+
+function sanitizeLinkHref(value: string): string {
+  const href = String(value || "").trim();
+  if (!href) {
+    return "";
+  }
+  if (href.startsWith("/") || href.startsWith("#")) {
+    return href;
+  }
+  const lower = href.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:")) {
+    return href;
+  }
+  return "";
 }
 
 type EditorBlockProps = {
   block: EditorBlockData;
   isEditing: boolean;
   onFocus: () => void;
-  onChange: (content: string, type?: BlockType) => void;
+  onChange: (content: string, type?: BlockType, options?: { checked?: boolean }) => void;
   onFileUpload?: (file: File) => Promise<void>;
   onEnter: () => void;
   onDelete: () => void;
@@ -101,7 +192,8 @@ export function EditorBlock({
   autoFocus,
 }: EditorBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [localContent, setLocalContent] = useState(block.content);
+  const isComposingRef = useRef(false);
+  const localContent = block.content || "";
 
   // Auto-focus when entering edit mode
   useEffect(() => {
@@ -114,6 +206,10 @@ export function EditorBlock({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const native = e.nativeEvent as unknown as { isComposing?: boolean; keyCode?: number };
+      if (isComposingRef.current || native?.isComposing || native?.keyCode === 229) {
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         onChange(localContent);
@@ -131,12 +227,10 @@ export function EditorBlock({
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value;
-      setLocalContent(value);
 
       const detected = detectBlockType(value, block.type);
       if (detected) {
         onChange(detected.content, detected.type);
-        setLocalContent(detected.content);
       } else {
         onChange(value);
       }
@@ -145,13 +239,26 @@ export function EditorBlock({
   );
 
   const rows = Math.max(1, localContent.split("\n").length);
+  const inlineNodes = useMemo(() => inlineTokens(localContent || ""), [localContent]);
+  const listLines = useMemo(() => {
+    const lines = localContent.split("\n").map((line) => line.trim()).filter(Boolean);
+    return toStableLineEntries(lines.length ? lines : [""]);
+  }, [localContent]);
+
+  const activateOnPointer = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      event.preventDefault();
+      onFocus();
+    },
+    [onFocus]
+  );
 
   // --- Divider ---
   if (block.type === "divider") {
     return (
-      <div className="py-2" onClick={onFocus}>
-        <hr className="border-[var(--border)]" />
-      </div>
+      <button type="button" className="block w-full py-2 text-left" onMouseDown={activateOnPointer}>
+        <span className="block border-t border-[var(--border)]" />
+      </button>
     );
   }
 
@@ -222,7 +329,6 @@ export function EditorBlock({
     return (
       <div
         className="flex cursor-pointer items-start gap-2 rounded-md p-1 hover:bg-[var(--surface-strong)]"
-        onClick={onFocus}
       >
         <input
           type="checkbox"
@@ -230,15 +336,17 @@ export function EditorBlock({
           checked={Boolean(block.checked)}
           onChange={(e) => {
             e.stopPropagation();
-            onChange(block.content);
+            onChange(block.content, undefined, { checked: e.target.checked });
           }}
           onClick={(e) => e.stopPropagation()}
         />
-        <span
-          className={`text-sm leading-relaxed ${block.checked ? "text-[var(--muted)] line-through" : "text-[var(--foreground)]"}`}
-        >
-          {block.content || "\u00A0"}
-        </span>
+        <button type="button" className="min-w-0 flex-1 text-left" onMouseDown={activateOnPointer}>
+          <span
+            className={`text-sm leading-relaxed ${block.checked ? "text-[var(--muted)] line-through" : "text-[var(--foreground)]"}`}
+          >
+            {block.content || "\u00A0"}
+          </span>
+        </button>
       </div>
     );
   }
@@ -253,6 +361,14 @@ export function EditorBlock({
         value={localContent}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onCompositionStart={() => {
+          isComposingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          queueMicrotask(() => {
+            isComposingRef.current = false;
+          });
+        }}
         onBlur={() => onChange(localContent)}
         placeholder={block.type === "code" ? "코드를 입력하세요..." : "텍스트를 입력하세요..."}
       />
@@ -260,46 +376,79 @@ export function EditorBlock({
   }
 
   // --- Render mode ---
-  const html = renderMarkdown(wrapWithMarkdownSyntax(block));
+  const commonClass = "cursor-pointer rounded-md p-1 hover:bg-[var(--surface-strong)]";
+
+  if (block.type === "heading1") {
+    return (
+      <h1 className={`${commonClass} text-2xl font-bold text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {renderInline(inlineNodes, !inlineNodes.length)}
+      </h1>
+    );
+  }
+
+  if (block.type === "heading2") {
+    return (
+      <h2 className={`${commonClass} text-xl font-bold text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {renderInline(inlineNodes, !inlineNodes.length)}
+      </h2>
+    );
+  }
+
+  if (block.type === "heading3") {
+    return (
+      <h3 className={`${commonClass} text-lg font-semibold text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {renderInline(inlineNodes, !inlineNodes.length)}
+      </h3>
+    );
+  }
+
+  if (block.type === "bulletList") {
+    return (
+      <ul className={`${commonClass} list-disc pl-5 text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {listLines.map((entry) => (
+          <li key={`bullet-${entry.key}`} className="ml-1">
+            {renderInline(inlineTokens(entry.line), !entry.line)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (block.type === "numberedList") {
+    return (
+      <ol className={`${commonClass} list-decimal pl-5 text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {listLines.map((entry) => (
+          <li key={`number-${entry.key}`} className="ml-1">
+            {renderInline(inlineTokens(entry.line), !entry.line)}
+          </li>
+        ))}
+      </ol>
+    );
+  }
+
+  if (block.type === "quote") {
+    return (
+      <blockquote className={`${commonClass} border-l-2 border-[var(--border)] pl-3 text-sm leading-relaxed text-[var(--muted)]`} onMouseDown={activateOnPointer}>
+        {listLines.map((entry) => (
+          <p key={`quote-${entry.key}`}>
+            {renderInline(inlineTokens(entry.line), !entry.line)}
+          </p>
+        ))}
+      </blockquote>
+    );
+  }
+
+  if (block.type === "code") {
+    return (
+      <pre className={`${commonClass} overflow-auto rounded-md bg-[var(--surface-strong)] p-3 text-xs text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        <code>{localContent || "\u00A0"}</code>
+      </pre>
+    );
+  }
 
   return (
-    <div
-      className="max-w-none cursor-pointer rounded-md p-1 text-sm leading-relaxed text-[var(--foreground)] hover:bg-[var(--surface-strong)] [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--muted)] [&_code]:rounded [&_code]:bg-[var(--surface-strong)] [&_code]:px-1 [&_code]:text-xs [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:text-xl [&_h2]:font-bold [&_h3]:text-lg [&_h3]:font-semibold [&_li]:ml-4 [&_ol]:list-decimal [&_p]:leading-relaxed [&_pre]:rounded [&_pre]:bg-[var(--surface-strong)] [&_pre]:p-3 [&_ul]:list-disc"
-      onClick={onFocus}
-      dangerouslySetInnerHTML={{ __html: html || "<p class='text-[var(--muted)]'>\u00A0</p>" }}
-    />
+    <p className={`${commonClass} text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+      {renderInline(inlineNodes, !inlineNodes.length)}
+    </p>
   );
-}
-
-// --- Helpers ---------------------------------------------------------------
-
-function wrapWithMarkdownSyntax(block: EditorBlockData): string {
-  const c = block.content;
-  switch (block.type) {
-    case "heading1":
-      return `# ${c}`;
-    case "heading2":
-      return `## ${c}`;
-    case "heading3":
-      return `### ${c}`;
-    case "bulletList":
-      return c
-        .split("\n")
-        .map((line) => `- ${line}`)
-        .join("\n");
-    case "numberedList":
-      return c
-        .split("\n")
-        .map((line, i) => `${i + 1}. ${line}`)
-        .join("\n");
-    case "quote":
-      return c
-        .split("\n")
-        .map((line) => `> ${line}`)
-        .join("\n");
-    case "code":
-      return `\`\`\`${block.lang || ""}\n${c}\n\`\`\``;
-    default:
-      return c;
-  }
 }
