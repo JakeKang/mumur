@@ -16,7 +16,8 @@ test("admin can invite member from team page", async ({ page }) => {
 test("integration panel updates webhook", async ({ page }) => {
   await loginAsLocalTester(page);
 
-  await page.getByRole("button", { name: "연동", exact: true }).click();
+  await page.getByRole("button", { name: "팀 관리" }).first().click();
+  await expect(page.getByRole("heading", { name: "팀 관리" })).toBeVisible();
   await page.getByRole("button", { name: "웹훅 설정 열기" }).click();
   await expect(page.getByRole("button", { name: "저장" })).toBeVisible();
 
