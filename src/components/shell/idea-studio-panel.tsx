@@ -2,46 +2,47 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { MentionAssistPanel } from "@/components/shell/mention-assist-panel";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { ThreadWorkflowDrawer } from "@/components/shell/thread-workflow-drawer";
 import { categoryLabel, timelineEventLabel } from "@/lib/ui-labels";
-import { ArrowLeft, Lightbulb, MessageSquareText, ScrollText, SquarePen } from "lucide-react";
-import { BlockActionsMenu } from "@/components/shell/block-actions-menu";
+import { ArrowLeft, Bot, GitBranch, MessageSquareText, ScrollText, Sparkles, SquarePen } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { BlockEditor } from "@/components/editor/BlockEditor";
+import { PriorityBadge } from "@/components/ui/priority-badge";
+
+type AssistantMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+};
+
+function nextBlockId() {
+  return `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
 
 export function IdeaStudioPanel({
   selectedIdea,
-  ideas,
-  selectIdea,
   onBackToList,
   studioTab,
   setStudioTab,
-  IDEA_STATUS,
   STATUS_META,
-  busy,
   handleSaveIdea,
   updateSelectedIdeaField,
-  addBlock,
-  applySlashCommand,
   blocks,
-  BLOCK_TYPES,
-  updateBlock,
-  moveBlockUp,
-  moveBlockDown,
-  duplicateBlock,
-  removeBlock,
   setCommentBlockId,
-  handleGenerateSummary,
   commentDraft,
   setCommentDraft,
   handleCreateComment,
+  handleUpdateComment,
+  handleDeleteComment,
   commentBlockId,
   comments,
   commentFilterBlockId,
   setCommentFilterBlockId,
   applyCommentFilter,
   reactions,
+  reactionsByTarget,
   handleReaction,
   votes,
   handleVote,
@@ -66,17 +67,38 @@ export function IdeaStudioPanel({
   threadComments,
   formatTime,
   handleCreateVersion,
+  handleRestoreVersion,
   versionForm,
   setVersionForm,
-  setVersionFile,
   versions,
   timeline,
-  teamMembers
+  teamMembers,
+  presenceUsers,
+  myRole,
+  canEditIdea,
+  currentUserId,
+  handleUpdateThreadComment,
+  handleDeleteThreadComment,
+  handleUploadBlockFile
 }) {
   const [threadListFilter, setThreadListFilter] = useState("all");
   const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
+  const [editingCommentDraft, setEditingCommentDraft] = useState("");
   const [commentMentionIndex, setCommentMentionIndex] = useState(0);
   const [threadMentionIndex, setThreadMentionIndex] = useState(0);
+  const [editorMode, setEditorMode] = useState<"markdown" | "review" | "mindmap">("markdown");
+  const [assistantDraft, setAssistantDraft] = useState("");
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+  const [restoreTarget, setRestoreTarget] = useState<null | {
+    versionId: number;
+    label: string;
+    createdAt: number;
+    preview: string;
+  }>(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreRevision, setRestoreRevision] = useState(0);
   const [recentMentionEmails, setRecentMentionEmails] = useState(() => {
     if (typeof window === "undefined") {
       return [];
@@ -135,7 +157,25 @@ export function IdeaStudioPanel({
     return threads.filter((item) => item.status === threadListFilter);
   }, [threadListFilter, threads]);
 
-  const recentIdeas = useMemo(() => ideas.slice(0, 12), [ideas]);
+  const visiblePresenceUsers = useMemo(() => (presenceUsers || []).slice(0, 3), [presenceUsers]);
+  const isReadOnly = !canEditIdea || myRole === "viewer";
+  const canModerate = myRole === "admin" || myRole === "owner";
+  const ideaPriority = useMemo(() => {
+    if (!selectedIdea) {
+      return "low";
+    }
+    if (selectedIdea.priorityLevel) {
+      return selectedIdea.priorityLevel;
+    }
+    const engagement = Number(selectedIdea.commentCount || 0) + Number(selectedIdea.reactionCount || 0) + Number(selectedIdea.versionCount || 0);
+    if (selectedIdea.status === "harvest" || engagement >= 24) {
+      return "high";
+    }
+    if (selectedIdea.status === "grow" || engagement >= 10) {
+      return "medium";
+    }
+    return "low";
+  }, [selectedIdea]);
 
   const mentionTokenFromText = (value) => {
     const text = String(value || "");
@@ -298,82 +338,250 @@ export function IdeaStudioPanel({
     }
   };
 
+  const quickAssistantPrompts = ["핵심 리스크 정리", "다음 액션 3개 제안", "현재 상태 요약"];
+
+  const previewFromVersion = (version) => {
+    const raw = String(version?.notes || "").trim();
+    if (!raw) {
+      return "저장된 블록 미리보기가 없습니다.";
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const text = parsed
+          .map((block) => String(block?.content || "").trim())
+          .filter(Boolean)
+          .slice(0, 3)
+          .join("\n");
+        return text || "본문 텍스트가 없는 스냅샷입니다.";
+      }
+    } catch {}
+    return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+  };
+
+  const mindmapNodes = useMemo(() => {
+    if (!selectedIdea) {
+      return [];
+    }
+    return (selectedIdea.blocks || [])
+      .filter((block) => ["heading1", "heading2", "heading3", "paragraph"].includes(block.type))
+      .map((block) => ({ id: block.id, text: String(block.content || "").trim() }))
+      .filter((block) => Boolean(block.text))
+      .slice(0, 9);
+  }, [selectedIdea]);
+
+  const currentIdeaId = selectedIdea?.id ?? null;
+  const currentIdeaSummary = selectedIdea?.aiSummary ?? "";
+
+  useEffect(() => {
+    if (!currentIdeaId) {
+      setAssistantMessages([]);
+      setAssistantDraft("");
+      setAssistantBusy(false);
+      return;
+    }
+    const initial = currentIdeaSummary
+      ? `현재 저장된 요약:\n${currentIdeaSummary}`
+      : "안녕하세요. 이 아이디어의 상태 요약, 리스크 정리, 다음 액션 제안을 도와드릴게요.";
+    setAssistantMessages([
+      {
+        id: `assistant-init-${currentIdeaId}`,
+        role: "assistant",
+        content: initial,
+        createdAt: Date.now()
+      }
+    ]);
+    setAssistantDraft("");
+    setAssistantBusy(false);
+  }, [currentIdeaId, currentIdeaSummary]);
+
+  const runIdeaSummary = async () => {
+    if (!selectedIdeaId) {
+      return "아이디어가 선택되지 않았습니다.";
+    }
+    const data = await api(`/api/ideas/${selectedIdeaId}/summary`, { method: "POST" });
+    if (data?.aiSummary) {
+      updateSelectedIdeaField("aiSummary", data.aiSummary);
+      return `요약을 갱신했습니다.\n${data.aiSummary}`;
+    }
+    return "요약 생성에 실패했습니다.";
+  };
+
+  const appendTemplateBlock = async (type, content) => {
+    if (!selectedIdea || isReadOnly) {
+      return;
+    }
+    await handleSaveIdea(null, {
+      blocks: [
+        ...(selectedIdea.blocks || []),
+        { id: nextBlockId(), type, content, checked: false }
+      ]
+    });
+  };
+
+  const buildAssistantReply = async (prompt) => {
+    const text = String(prompt || "").toLowerCase();
+    const openThreads = threads.filter((thread) => thread.status === "active").length;
+    const totalComments = comments.length;
+    const latest = selectedIdea?.updatedAt ? formatTime(selectedIdea.updatedAt) : "-";
+
+    if (text.includes("요약") || text.includes("summary")) {
+      if (isReadOnly) {
+        return "viewer 권한에서는 요약을 생성할 수 없습니다.";
+      }
+      return runIdeaSummary();
+    }
+
+    if (text.includes("리스크") || text.includes("위험") || text.includes("risk")) {
+      return [
+        `리스크 스냅샷 (${latest})`,
+        `- 진행 중 스레드: ${openThreads}개`,
+        `- 전체 댓글: ${totalComments}개`,
+        `- 현재 아이디어 상태: ${STATUS_META[selectedIdea?.status]?.label || selectedIdea?.status || "-"}`,
+        "- 권장: 진행 중 스레드 우선순위 정렬 후 1개씩 해결 상태로 이동"
+      ].join("\n");
+    }
+
+    if (text.includes("다음") || text.includes("todo") || text.includes("액션")) {
+      return [
+        "추천 다음 액션", 
+        "1) 해결되지 않은 스레드 1개를 선택해 결론을 작성합니다.",
+        "2) 결론 내용을 체크리스트 블록으로 변환해 실행 항목을 고정합니다.",
+        "3) 작업 후 버전을 하나 등록해 변경 이력을 남깁니다."
+      ].join("\n");
+    }
+
+    return [
+      "요청을 반영한 기본 분석입니다.",
+      `- 블록 수: ${(selectedIdea?.blocks || []).length}개`,
+      `- 댓글 수: ${totalComments}개`,
+      `- 진행 스레드: ${openThreads}개`,
+      "원하면 '현재 상태 요약' 또는 '핵심 리스크 정리'로 더 구체화할 수 있습니다."
+    ].join("\n");
+  };
+
+  const sendAssistantPrompt = async (prompt) => {
+    const content = String(prompt || "").trim();
+    if (!content || !selectedIdea) {
+      return;
+    }
+    const createdAt = Date.now();
+    setAssistantMessages((prev) => [...prev, { id: `assistant-user-${createdAt}`, role: "user", content, createdAt }]);
+    setAssistantDraft("");
+    setAssistantBusy(true);
+    try {
+      const reply = await buildAssistantReply(content);
+      setAssistantMessages((prev) => [
+        ...prev,
+        { id: `assistant-ai-${Date.now()}`, role: "assistant", content: String(reply || "응답을 만들지 못했습니다."), createdAt: Date.now() }
+      ]);
+    } catch {
+      setAssistantMessages((prev) => [
+        ...prev,
+        { id: `assistant-ai-${Date.now()}`, role: "assistant", content: "요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.", createdAt: Date.now() }
+      ]);
+    } finally {
+      setAssistantBusy(false);
+    }
+  };
+
   return (
     <Card className={`studio-shell min-h-[70vh] xl:max-h-[calc(100vh-2rem)] xl:overflow-auto ${selectedIdea ? "studio-shell-detail" : "studio-shell-list"}`}>
-      <CardHeader>
-        <CardTitle>아이디어 스튜디오</CardTitle>
-        <p className="text-sm text-[var(--muted)]">블록 기반 편집과 협업 피드백을 한 화면에서 관리</p>
-      </CardHeader>
       <CardContent className="space-y-5">
         {!selectedIdea ? (
-          <section className="space-y-3">
-            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3">
-              <div className="flex items-start gap-2">
-                <Lightbulb className="mt-0.5 h-4 w-4 text-amber-600" />
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-[var(--muted)]">바로 시작</p>
-                  <p className="mt-1 text-sm text-[var(--muted)]">탐색/정렬/필터/저장된 뷰는 왼쪽 사이드바에서 관리됩니다. 여기서는 아이디어를 바로 열어 작업을 시작하세요.</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-xs uppercase tracking-wide text-[var(--muted)]">현재 뷰 아이디어</p>
-                <Badge>{`${recentIdeas.length}개`}</Badge>
-              </div>
-
-              {recentIdeas.length ? (
-                <div className="grid gap-3 md:grid-cols-2">
-                  {recentIdeas.map((idea) => (
-                    <button
-                      key={`studio-idea-${idea.id}`}
-                      type="button"
-                      className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition hover:border-[var(--border)] hover:bg-[var(--surface-strong)]"
-                      onClick={() => selectIdea(idea.id)}
-                    >
-                      <div className="mb-1 flex items-start justify-between gap-2">
-                        <p className="font-medium text-[var(--foreground)]">{idea.title}</p>
-                        <Badge>{`${STATUS_META[idea.status]?.icon || "💡"} ${STATUS_META[idea.status]?.label || idea.status}`}</Badge>
-                      </div>
-                      <p className="text-xs text-[var(--muted)]">{categoryLabel(idea.category)}</p>
-                      <p className="text-xs text-[var(--muted)]">{`${formatTime(idea.updatedAt)} · 💬 ${idea.commentCount || 0} · 👍 ${idea.reactionCount || 0} · 📄 ${idea.versionCount || 0}`}</p>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-[var(--muted)]">사이드바 조건에 맞는 아이디어가 없습니다. 필터를 조정하거나 새 아이디어를 생성하세요.</p>
-              )}
-            </div>
+          <section className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
+            <p className="text-sm text-[var(--muted)]">선택된 아이디어가 없습니다.</p>
+            <Button type="button" onClick={onBackToList} className="w-fit">전체 아이디어로 이동</Button>
           </section>
         ) : (
           <>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <div className="sticky top-0 z-20 mb-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-1">
+                    <button
+                      type="button"
+                      className={`rounded px-2 py-1 text-xs ${editorMode === "markdown" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
+                      onClick={() => setEditorMode("markdown")}
+                    >
+                      <SquarePen className="mr-1 inline-block h-3.5 w-3.5" />
+                      Markdown
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded px-2 py-1 text-xs ${editorMode === "review" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
+                      onClick={() => setEditorMode("review")}
+                    >
+                      <MessageSquareText className="mr-1 inline-block h-3.5 w-3.5" />
+                      Review
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded px-2 py-1 text-xs ${editorMode === "mindmap" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
+                      onClick={() => setEditorMode("mindmap")}
+                    >
+                      <GitBranch className="mr-1 inline-block h-3.5 w-3.5" />
+                      Mindmap
+                    </button>
+                  </div>
+
+                  <div className="ml-auto flex flex-wrap items-center gap-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          const reply = await runIdeaSummary();
+                          setAssistantMessages((prev) => [
+                            ...prev,
+                            { id: `assistant-ai-${Date.now()}`, role: "assistant", content: reply, createdAt: Date.now() }
+                          ]);
+                        } catch (error) {
+                          const message = error instanceof Error ? error.message : "요약 생성에 실패했습니다.";
+                          setAssistantMessages((prev) => [
+                            ...prev,
+                            { id: `assistant-ai-${Date.now()}`, role: "assistant", content: message, createdAt: Date.now() }
+                          ]);
+                        }
+                      }}
+                      disabled={isReadOnly}
+                    >
+                      <Sparkles className="mr-1 h-3.5 w-3.5" />
+                      AI 요약
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => appendTemplateBlock("checklist", "실행 항목")} disabled={isReadOnly}>체크리스트</Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => appendTemplateBlock("heading2", "다음 작업")} disabled={isReadOnly}>다음 작업</Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => setStudioTab("collab")}>사이드 패널</Button>
+                  </div>
+                </div>
+              </div>
+
               <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-                <Badge>{`${STATUS_META[selectedIdea.status]?.icon || "💡"} ${STATUS_META[selectedIdea.status]?.label || selectedIdea.status}`}</Badge>
-                <span>•</span>
-                <span>{categoryLabel(selectedIdea.category)}</span>
-                <span>•</span>
-                <span>{formatTime(selectedIdea.updatedAt)}</span>
+                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">상태 {STATUS_META[selectedIdea.status]?.icon || "💡"} {STATUS_META[selectedIdea.status]?.label || selectedIdea.status}</span>
+                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">우선순위 <PriorityBadge level={ideaPriority} /></span>
+                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">생성 {formatTime(selectedIdea.createdAt)}</span>
+                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">수정 {formatTime(selectedIdea.updatedAt)}</span>
+                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">분류 {categoryLabel(selectedIdea.category)}</span>
                 <Button size="sm" variant="outline" onClick={onBackToList} className="ml-auto">
                   <ArrowLeft className="mr-1 h-4 w-4" />
                   목록으로
                 </Button>
               </div>
 
-              <h2 className="mb-2 font-serif text-2xl font-bold tracking-tight text-[var(--foreground)]">{selectedIdea.title}</h2>
-
-              <div className="mb-2 flex items-center gap-2 text-xs text-[var(--muted)]">
-                <Lightbulb className="h-3.5 w-3.5" />
-                <span>탭 전환 시 작성 내용 유지</span>
-              </div>
-
               <div className="mt-3 flex items-center border-b border-[var(--border)]">
                 <div className="flex flex-1 flex-wrap gap-0">
                   <button
                     type="button"
-                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "editor" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"}`}
-                    onClick={() => setStudioTab("editor")}
+                    className={`inline-flex items-center gap-1 border-b-2 px-3 py-2 text-sm ${studioTab === "editor" ? "border-[var(--accent)] text-[var(--foreground)]" : "border-transparent text-[var(--muted)]"} ${isReadOnly ? "cursor-not-allowed opacity-60" : ""}`}
+                    onClick={() => {
+                      if (!isReadOnly) {
+                        setStudioTab("editor");
+                      }
+                    }}
+                    disabled={isReadOnly}
+                    aria-disabled={isReadOnly}
+                    title={isReadOnly ? "viewer 권한에서는 편집 탭을 사용할 수 없습니다" : "편집"}
                   >
                     <SquarePen className="h-4 w-4" /> 편집
                   </button>
@@ -400,24 +608,60 @@ export function IdeaStudioPanel({
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1.5 pb-1 pr-1">
-                  {teamMembers.slice(0, 3).map((member) => (
-                    <span
-                      key={member.userId}
-                      title={member.name}
-                      className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--foreground)] text-[10px] font-semibold text-[var(--surface)]"
-                    >
-                      {String(member.name || "?")[0].toUpperCase()}
-                    </span>
-                  ))}
+                  {visiblePresenceUsers.length ? (
+                    visiblePresenceUsers.map((user) => (
+                      <span
+                        key={`presence-${user.userId}`}
+                        title={`${user.name} (온라인)`}
+                        className="relative flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-semibold text-[var(--surface)]"
+                      >
+                        {String(user.name || "?")[0].toUpperCase()}
+                        <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[var(--surface)] bg-emerald-500" />
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[10px] text-[var(--muted)]">온라인 없음</span>
+                  )}
                 </div>
               </div>
+              {isReadOnly ? (
+                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
+                  viewer 권한에서는 편집 탭이 비활성화됩니다. 댓글/토론/문서 탭에서 협업 내용을 확인할 수 있습니다.
+                </p>
+              ) : null}
             </div>
+
+            {studioTab === "editor" && editorMode === "review" ? (
+              <section className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3 text-xs text-[var(--muted)]">
+                <p className="font-medium text-[var(--foreground)]">리뷰 모드</p>
+                <p>{`진행 중 스레드 ${threadStatusCounts.active}개 · 댓글 ${comments.length}개 · 마지막 수정 ${formatTime(selectedIdea.updatedAt)}`}</p>
+              </section>
+            ) : null}
+
+            {studioTab === "editor" && editorMode === "mindmap" ? (
+              <section className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+                <p className="mb-2 text-sm font-medium text-[var(--foreground)]">아이디어 맵</p>
+                {mindmapNodes.length ? (
+                  <div className="grid gap-2 md:grid-cols-3">
+                    {mindmapNodes.map((node) => (
+                      <div key={`mindmap-node-${node.id}`} className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-[var(--foreground)]">
+                        {node.text}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-[var(--muted)]">맵으로 표시할 텍스트 블록이 아직 없습니다.</p>
+                )}
+              </section>
+            ) : null}
 
             {studioTab === "editor" ? (
               <BlockEditor
-                key={selectedIdea.id}
+                key={`${selectedIdea.id}-${restoreRevision}`}
                 idea={selectedIdea}
                 comments={comments}
+                reactionsByTarget={reactionsByTarget}
+                readOnly={isReadOnly}
                 STATUS_META={STATUS_META}
                 formatTime={formatTime}
                 onSaveBlocks={async (editorBlocks) => {
@@ -435,6 +679,7 @@ export function IdeaStudioPanel({
                 onSaveStatus={async (status) => {
                   await handleSaveIdea(null, { status });
                 }}
+                onUploadFile={handleUploadBlockFile}
                 onOpenBlockComments={(blockId) => {
                   setCommentBlockId(blockId);
                   setCommentFilterBlockId(blockId);
@@ -448,12 +693,23 @@ export function IdeaStudioPanel({
 
             {studioTab === "collab" ? (
               <>
+                <div className="grid gap-3 xl:grid-cols-[1fr_320px]">
+                  <div className="space-y-2">
             <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
               <div className="flex items-center justify-between gap-2">
                 <p className="font-medium">댓글</p>
                 <Badge>{`${comments.length}개 댓글`}</Badge>
               </div>
-              <form className="flex flex-wrap gap-2" onSubmit={handleCreateComment}>
+              <form
+                className="flex flex-wrap gap-2"
+                onSubmit={(event) => {
+                  if (isReadOnly) {
+                    event.preventDefault();
+                    return;
+                  }
+                  void handleCreateComment(event);
+                }}
+              >
                 <Input
                   className="min-w-[240px] flex-1"
                   value={commentDraft}
@@ -464,7 +720,7 @@ export function IdeaStudioPanel({
                   aria-expanded={commentMentionMatches.length > 0}
                   aria-controls={commentMentionMatches.length ? commentMentionListboxId : undefined}
                   aria-activedescendant={commentMentionMatches.length ? activeCommentMentionOptionId : undefined}
-                  aria-describedby={commentMentionMatches.length ? `comment-mention-help ${commentMentionStatusId}` : undefined}
+                  aria-describedby={commentMentionMatches.length ? commentMentionStatusId : undefined}
                   onChange={(event) => {
                     setCommentDraft(event.target.value);
                     setCommentMentionIndex(0);
@@ -479,12 +735,14 @@ export function IdeaStudioPanel({
                       commentDraft
                     )
                   }
+                  disabled={isReadOnly}
                   required
                 />
                 <select
                   className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
                   value={commentBlockId}
                   onChange={(event) => setCommentBlockId(event.target.value)}
+                  disabled={isReadOnly}
                 >
                   <option value="">아이디어 전체</option>
                   {blocks.map((block) => (
@@ -493,7 +751,7 @@ export function IdeaStudioPanel({
                     </option>
                   ))}
                 </select>
-                <Button type="submit">등록</Button>
+                <Button type="submit" disabled={isReadOnly}>등록</Button>
               </form>
               <MentionAssistPanel
                 matches={commentMentionMatches}
@@ -509,7 +767,7 @@ export function IdeaStudioPanel({
                 activeOptionId={activeCommentMentionOptionId}
                 announcement={commentMentionAnnouncement}
                 helpId="comment-mention-help"
-                helpText="멘션 자동완성 (화살표/엔터/탭 지원)"
+                helpText=""
                 listboxLabel="댓글 멘션 후보"
                 previewTitle="멘션 대상 미리보기"
               />
@@ -534,8 +792,101 @@ export function IdeaStudioPanel({
                 {comments.length ? (
                   comments.map((comment) => (
                     <div key={comment.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                      <p className="text-sm font-medium">{comment.userName}</p>
-                      <p className="text-sm">{comment.content}</p>
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium">{comment.userName}</p>
+                        {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setEditingCommentId(comment.id);
+                                setEditingCommentDraft(comment.content || "");
+                              }}
+                            >
+                              수정
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={async () => {
+                                if (confirm("이 댓글을 삭제할까요?")) {
+                                  await handleDeleteComment(comment.id);
+                                  if (editingCommentId === comment.id) {
+                                    setEditingCommentId(null);
+                                    setEditingCommentDraft("");
+                                  }
+                                }
+                              }}
+                            >
+                              삭제
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                      {editingCommentId === comment.id ? (
+                        <div className="space-y-2">
+                          <Input
+                            value={editingCommentDraft}
+                            onChange={(event) => setEditingCommentDraft(event.target.value)}
+                            placeholder="댓글 수정"
+                          />
+                          <div className="flex items-center gap-1">
+                            <Button
+                              type="button"
+                              size="sm"
+                              onClick={async () => {
+                                const next = editingCommentDraft.trim();
+                                if (!next) {
+                                  return;
+                                }
+                                await handleUpdateComment(comment.id, next);
+                                setEditingCommentId(null);
+                                setEditingCommentDraft("");
+                              }}
+                            >
+                              저장
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setEditingCommentId(null);
+                                setEditingCommentDraft("");
+                              }}
+                            >
+                              취소
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-sm">{comment.content}</p>
+                      )}
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        {["👍", "🔥", "✅"].map((emoji) => {
+                          const targetId = `idea:${comment.id}`;
+                          const key = `comment:${targetId}`;
+                          const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
+                          const item = (summary.reactions || []).find((row) => row.emoji === emoji);
+                          const mine = (summary.mine || []).includes(emoji);
+                          return (
+                            <Button
+                              key={`comment-reaction-${comment.id}-${emoji}`}
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className={mine ? "border-[var(--accent)]" : undefined}
+                              onClick={() => handleReaction(emoji, "comment", targetId)}
+                              disabled={isReadOnly}
+                            >
+                              {emoji} {item?.count || 0}
+                            </Button>
+                          );
+                        })}
+                      </div>
                       <p className="text-xs text-[var(--muted)]">{`${comment.blockId || "아이디어"} · ${formatTime(comment.createdAt)}`}</p>
                     </div>
                   ))
@@ -549,7 +900,7 @@ export function IdeaStudioPanel({
               <p className="font-medium">리액션</p>
               <div className="flex items-center gap-2">
                 {["👍", "🔥", "🤔", "✅"].map((emoji) => (
-                  <Button key={emoji} variant="outline" size="sm" onClick={() => handleReaction(emoji)}>
+                  <Button key={emoji} variant="outline" size="sm" onClick={() => handleReaction(emoji)} disabled={isReadOnly}>
                     {emoji}
                   </Button>
                 ))}
@@ -564,14 +915,14 @@ export function IdeaStudioPanel({
             <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
               <p className="font-medium">투표</p>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "approve")}>
+                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "approve")} disabled={isReadOnly}>
                   찬성
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "reject")}>
+                <Button variant="outline" size="sm" onClick={() => handleVote("binary", "reject")} disabled={isReadOnly}>
                   반대
                 </Button>
                 {[1, 2, 3, 4, 5].map((score) => (
-                  <Button key={score} variant="outline" size="sm" onClick={() => handleVote("score", score)}>
+                  <Button key={score} variant="outline" size="sm" onClick={() => handleVote("score", score)} disabled={isReadOnly}>
                     {score}
                   </Button>
                 ))}
@@ -584,7 +935,6 @@ export function IdeaStudioPanel({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="font-medium text-[var(--foreground)]">토론 스레드</p>
-                  <p className="text-xs text-[var(--muted)]">복잡한 생성/편집/댓글 워크플로우는 전용 패널에서 처리합니다.</p>
                 </div>
                 <Button type="button" size="sm" onClick={() => setThreadDrawerOpen(true)}>
                   스레드 패널 열기
@@ -600,6 +950,63 @@ export function IdeaStudioPanel({
                 {selectedThread ? `현재 선택: ${selectedThread.title}` : "현재 선택된 스레드가 없습니다."}
               </p>
             </section>
+
+                  </div>
+
+                  <aside className="space-y-2 xl:sticky xl:top-20">
+                    <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium text-[var(--foreground)]">AI 어시스턴트</p>
+                        <Badge>{assistantBusy ? "응답 중" : "대화"}</Badge>
+                      </div>
+                      <div className="max-h-80 space-y-2 overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
+                        {assistantMessages.length ? (
+                          assistantMessages.map((message) => (
+                            <div
+                              key={message.id}
+                              className={`rounded-md px-2 py-1.5 text-xs whitespace-pre-wrap ${message.role === "assistant" ? "bg-[var(--surface-strong)] text-[var(--foreground)]" : "bg-[var(--accent)]/10 text-[var(--foreground)]"}`}
+                            >
+                              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                                {message.role === "assistant" ? "assistant" : "you"}
+                              </p>
+                              <p>{message.content}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-[var(--muted)]">대화를 시작해보세요.</p>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {quickAssistantPrompts.map((prompt) => (
+                          <button
+                            key={`assistant-prompt-${prompt}`}
+                            type="button"
+                            className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-[11px] text-[var(--muted)] hover:text-[var(--foreground)]"
+                            onClick={() => sendAssistantPrompt(prompt)}
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                      <form
+                        className="flex gap-2"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          await sendAssistantPrompt(assistantDraft);
+                        }}
+                      >
+                        <Input
+                          value={assistantDraft}
+                          onChange={(event) => setAssistantDraft(event.target.value)}
+                          placeholder="질문 또는 요청"
+                        />
+                        <Button type="submit" size="sm" disabled={assistantBusy || !assistantDraft.trim()}>
+                          <Bot className="h-3.5 w-3.5" />
+                        </Button>
+                      </form>
+                    </section>
+                  </aside>
+                </div>
 
             <ThreadWorkflowDrawer
               open={threadDrawerOpen}
@@ -639,6 +1046,13 @@ export function IdeaStudioPanel({
               handleMentionKeyDown={handleMentionKeyDown}
               threadComments={threadComments}
               formatTime={formatTime}
+              currentUserId={currentUserId}
+              myRole={myRole}
+              canEditIdea={canEditIdea}
+              handleUpdateThreadComment={handleUpdateThreadComment}
+              handleDeleteThreadComment={handleDeleteThreadComment}
+              reactionsByTarget={reactionsByTarget}
+              handleReaction={handleReaction}
             />
               </>
             ) : null}
@@ -646,83 +1060,99 @@ export function IdeaStudioPanel({
             {studioTab === "docs" ? (
               <>
             <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <p className="font-medium">기획서 버전</p>
-              <form className="grid gap-2" onSubmit={handleCreateVersion}>
-                <Input
-                  placeholder="버전 이름"
-                  value={versionForm.versionLabel}
-                  onChange={(event) => setVersionForm((prev) => ({ ...prev, versionLabel: event.target.value }))}
-                />
-                <Input
-                  placeholder="변경 메모"
-                  value={versionForm.notes}
-                  onChange={(event) => setVersionForm((prev) => ({ ...prev, notes: event.target.value }))}
-                />
-                <Input
-                  type="file"
-                  onChange={(event) => setVersionFile(event.target.files?.[0] || null)}
-                />
-                <Button type="submit">버전 등록</Button>
-              </form>
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-medium">타임라인</p>
+                <form
+                  className="flex items-center gap-1.5"
+                  onSubmit={(event) => {
+                    if (isReadOnly) {
+                      event.preventDefault();
+                      return;
+                    }
+                    void handleCreateVersion(event);
+                  }}
+                >
+                  <Input
+                    className="h-8 w-40"
+                    placeholder="스냅샷 이름"
+                    value={versionForm.versionLabel}
+                    onChange={(event) => setVersionForm((prev) => ({ ...prev, versionLabel: event.target.value }))}
+                    disabled={isReadOnly}
+                  />
+                  <Button type="submit" size="sm" disabled={isReadOnly}>스냅샷 생성</Button>
+                </form>
+              </div>
               <div className="grid gap-2">
-                {versions.length ? (
-                  versions.map((version) => {
-                    const isAuto = String(version.versionLabel).startsWith("auto-");
+                {timeline.length ? (
+                  timeline.map((event) => {
+                    const payload = event?.payload || {};
+                    const createdLabel = event.type === "version.created" ? String(payload?.versionLabel || "") : "";
+                    const sourceLabel = event.type === "version.restored"
+                      ? String(payload?.sourceVersionLabel || payload?.versionLabel || payload?.from || "")
+                      : "";
+                    const restoredLabel = event.type === "version.restored" ? String(payload?.restoredVersionLabel || "") : "";
+                    const restoreLabel = sourceLabel || createdLabel;
+                    const payloadVersionId = Number(
+                      event.type === "version.restored" ? (payload?.sourceVersionId ?? payload?.versionId) : payload?.versionId
+                    );
+                    const restoreVersionById = Number.isInteger(payloadVersionId) && payloadVersionId > 0
+                      ? versions.find((version) => Number(version.id) === payloadVersionId)
+                      : null;
+                    const fallbackMatches = restoreLabel
+                      ? versions.filter((version) => String(version.versionLabel) === restoreLabel)
+                      : [];
+                    const hasAmbiguousFallback = !restoreVersionById && fallbackMatches.length > 1;
+                    const restoreVersion = restoreVersionById || fallbackMatches[0] || null;
+                    const isRestoredSnapshot = event.type === "version.created" && createdLabel.startsWith("복원-");
+
                     return (
-                      <div key={version.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
+                      <div key={event.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
                         <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              {isAuto ? (
-                                <span className="rounded bg-[var(--surface-strong)] px-1 py-0.5 text-[10px] text-[var(--muted)]">자동</span>
-                              ) : (
-                                <span className="rounded bg-[var(--accent)]/10 px-1 py-0.5 text-[10px] text-[var(--accent)]">수동</span>
-                              )}
-                              <p className="truncate text-xs font-medium">{version.versionLabel}</p>
-                            </div>
-                            <p className="mt-0.5 text-xs text-[var(--muted)]">{version.creatorName} · {formatTime(version.createdAt)}</p>
+                          <div>
+                            <p className="font-medium">{timelineEventLabel(event.type)}</p>
+                            <p className="text-xs text-[var(--muted)]">{event.actor}</p>
+                            <p className="text-xs text-[var(--muted)]">{formatTime(event.createdAt)}</p>
+                            {event.type === "version.created" && createdLabel ? (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <span className={`rounded px-1.5 py-0.5 text-[10px] ${isRestoredSnapshot ? "bg-amber-100 text-amber-700" : "bg-[var(--surface-strong)] text-[var(--muted)]"}`}>
+                                  {isRestoredSnapshot ? "복원본" : "스냅샷"}
+                                </span>
+                                <p className="text-xs text-[var(--muted)]">{createdLabel}</p>
+                              </div>
+                            ) : null}
+                            {event.type === "version.restored" && sourceLabel ? (
+                              <div className="mt-1 space-y-0.5">
+                                <p className="text-xs text-[var(--muted)]">원본: {sourceLabel}</p>
+                                {restoredLabel ? <p className="text-xs text-[var(--muted)]">복원본: {restoredLabel}</p> : null}
+                              </div>
+                            ) : null}
                           </div>
-                          {!isAuto && (
+                          {restoreVersion && !isReadOnly ? (
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
-                              onClick={() => {
-                                if (confirm(`"${version.versionLabel}" 버전으로 복원할까요? 현재 내용이 대체됩니다.`)) {
-                                  api(`/api/ideas/${selectedIdeaId}/versions/${version.id}/restore`, { method: "POST" })
-                                    .then(() => window.location.reload());
-                                }
-                              }}
+                              disabled={hasAmbiguousFallback}
+                              title={hasAmbiguousFallback ? "동일 라벨 스냅샷이 여러 개라 복원 대상을 확정할 수 없습니다" : undefined}
+                              onClick={() =>
+                                setRestoreTarget({
+                                  versionId: restoreVersion.id,
+                                  label: restoreLabel,
+                                  createdAt: restoreVersion.createdAt,
+                                  preview: previewFromVersion(restoreVersion)
+                                })
+                              }
                             >
                               복원
                             </Button>
-                          )}
+                          ) : null}
                         </div>
-                        {version.filePath ? (
-                          <a className="mt-1 block text-xs text-[var(--foreground)] underline" href={version.filePath} target="_blank" rel="noreferrer">
-                            {version.fileName}
-                          </a>
+                        {hasAmbiguousFallback ? (
+                          <p className="mt-1 text-xs text-amber-700">동일 라벨 스냅샷이 여러 개라 현재 항목에서는 복원을 막았습니다.</p>
                         ) : null}
                       </div>
                     );
                   })
-                ) : (
-                  <p className="text-sm text-[var(--muted)]">버전 없음</p>
-                )}
-              </div>
-            </section>
-
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <p className="font-medium">타임라인</p>
-              <div className="grid gap-2">
-                {timeline.length ? (
-                  timeline.map((event) => (
-                    <div key={event.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                      <p className="font-medium">{timelineEventLabel(event.type)}</p>
-                      <p className="text-xs text-[var(--muted)]">{event.actor}</p>
-                      <p className="text-xs text-[var(--muted)]">{formatTime(event.createdAt)}</p>
-                    </div>
-                  ))
                 ) : (
                   <p className="text-sm text-[var(--muted)]">이벤트 없음</p>
                 )}
@@ -733,6 +1163,45 @@ export function IdeaStudioPanel({
           </>
         )}
       </CardContent>
+
+      {restoreTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button type="button" className="absolute inset-0 bg-slate-950/40" onClick={() => setRestoreTarget(null)} aria-label="복원 다이얼로그 닫기" />
+          <section className="relative w-full max-w-lg rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-2xl">
+            <p className="text-base font-semibold text-[var(--foreground)]">타임라인 복원</p>
+            <p className="mt-1 text-sm text-[var(--muted)]">대상 스냅샷: {restoreTarget.label}</p>
+            <p className="text-sm text-[var(--muted)]">시점: {formatTime(restoreTarget.createdAt)}</p>
+            <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-2">
+              <p className="mb-1 text-xs font-medium text-[var(--foreground)]">미리보기</p>
+              <pre className="whitespace-pre-wrap text-xs text-[var(--muted)]">{restoreTarget.preview}</pre>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setRestoreTarget(null)} disabled={restoreBusy}>취소</Button>
+              <Button
+                type="button"
+                disabled={restoreBusy}
+                onClick={async () => {
+                  if (!selectedIdeaId) {
+                    return;
+                  }
+                  setRestoreBusy(true);
+                  try {
+                    const restored = await handleRestoreVersion(restoreTarget.versionId);
+                    if (restored) {
+                      setRestoreRevision((prev) => prev + 1);
+                      setRestoreTarget(null);
+                    }
+                  } finally {
+                    setRestoreBusy(false);
+                  }
+                }}
+              >
+                {restoreBusy ? "복원 중..." : "복원 실행"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </Card>
   );
 }

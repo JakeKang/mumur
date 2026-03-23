@@ -226,7 +226,6 @@ export function WorkspaceSidebar({
       open={viewDialogOpen}
       onClose={() => setViewDialogOpen(false)}
       title="저장된 뷰 관리"
-      description="개인 뷰와 팀 공유 뷰를 생성/적용/정리합니다"
       maxWidthClass="max-w-2xl"
     >
       <div className="space-y-3">

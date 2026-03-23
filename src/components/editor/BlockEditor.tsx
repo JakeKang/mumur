@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { Idea, IdeaStatus, Comment } from "@/types";
 import { STATUS_META as STATUS_META_DEFAULT } from "@/lib/idea-status";
 import { EditorBlock } from "./EditorBlock";
@@ -14,13 +14,45 @@ function genId() {
   return `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function normalizeBlockType(rawType: string | undefined): BlockType {
+  const value = String(rawType || "").trim();
+  if (!value) {
+    return "paragraph";
+  }
+  if (
+    value === "paragraph" ||
+    value === "heading1" ||
+    value === "heading2" ||
+    value === "heading3" ||
+    value === "bulletList" ||
+    value === "numberedList" ||
+    value === "checklist" ||
+    value === "quote" ||
+    value === "code" ||
+    value === "divider" ||
+    value === "file"
+  ) {
+    return value;
+  }
+  if (value === "text") {
+    return "paragraph";
+  }
+  if (value === "heading") {
+    return "heading2";
+  }
+  if (value === "image") {
+    return "file";
+  }
+  return "paragraph";
+}
+
 function toEditorBlocks(raw: Idea["blocks"]): EditorBlockData[] {
   if (!raw || raw.length === 0) {
     return [{ id: genId(), type: "paragraph", content: "" }];
   }
   return raw.map((b) => ({
     id: b.id || genId(),
-    type: (b.type as BlockType) || "paragraph",
+    type: normalizeBlockType(b.type),
     content: b.content || "",
     checked: Boolean(b.checked),
   }));
@@ -37,6 +69,7 @@ const BLOCK_TYPE_OPTIONS: { type: BlockType; icon: string; label: string }[] = [
   { type: "quote",        icon: "❝",  label: "인용" },
   { type: "code",         icon: "</>", label: "코드" },
   { type: "divider",      icon: "—",  label: "구분선" },
+  { type: "file",         icon: "📎", label: "파일" },
 ];
 
 function SaveStatusBadge({ status, onRetry }: { status: SaveStatus; onRetry: () => void }) {
@@ -48,14 +81,19 @@ function SaveStatusBadge({ status, onRetry }: { status: SaveStatus; onRetry: () 
     error:  { text: "저장 실패 — 재시도", cls: "text-rose-600 cursor-pointer underline" },
   };
   const { text, cls } = map[status] ?? map.dirty;
+  if (status === "error") {
+    return (
+      <button
+        type="button"
+        className={`fixed right-6 top-3 z-50 select-none text-xs ${cls}`}
+        onClick={onRetry}
+      >
+        {text}
+      </button>
+    );
+  }
   return (
-    <span
-      role={status === "error" ? "button" : undefined}
-      tabIndex={status === "error" ? 0 : undefined}
-      className={`fixed right-6 top-3 z-50 select-none text-xs ${cls}`}
-      onClick={status === "error" ? onRetry : undefined}
-      onKeyDown={status === "error" ? (e) => e.key === "Enter" && onRetry() : undefined}
-    >
+    <span className={`fixed right-6 top-3 z-50 select-none text-xs ${cls}`}>
       {text}
     </span>
   );
@@ -67,18 +105,20 @@ type BlockRowProps = {
   total: number;
   isEditing: boolean;
   isDragOver: boolean;
+  isSelected: boolean;
+  readOnly: boolean;
   commentCount: number;
   blockReactions: { emoji: string; count: number; mine: boolean }[];
   onFocus: () => void;
+  onToggleSelect: (shiftKey: boolean) => void;
   onChange: (content: string, type?: BlockType) => void;
   onEnter: () => void;
   onDelete: () => void;
   onTypeChange: (type: BlockType) => void;
   onDragStart: () => void;
-  onDragOver: (e: React.DragEvent) => void;
-  onDrop: () => void;
   onOpenComments: () => void;
   onReaction: (emoji: string) => void;
+  onFileUpload: (file: File) => Promise<void>;
 };
 
 function BlockRow({
@@ -87,85 +127,107 @@ function BlockRow({
   total,
   isEditing,
   isDragOver,
+  isSelected,
+  readOnly,
   commentCount,
   blockReactions,
   onFocus,
+  onToggleSelect,
   onChange,
   onEnter,
   onDelete,
   onTypeChange,
   onDragStart,
-  onDragOver,
-  onDrop,
   onOpenComments,
   onReaction,
+  onFileUpload,
 }: BlockRowProps) {
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
-  const rowRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLElement>(null);
+  const dragTriggeredRef = useRef(false);
 
   return (
-    <div
+    <section
       ref={rowRef}
-      className={`group/row relative flex items-start gap-1 py-0.5 ${isDragOver ? "border-t-2 border-[var(--accent)]" : ""}`}
-      onDragOver={(e) => { e.preventDefault(); onDragOver(e); }}
-      onDrop={onDrop}
+      role="presentation"
+      data-block-index={index}
+      className={`group/row relative flex items-start gap-1 py-0.5 ${isDragOver ? "border-t-2 border-[var(--accent)]" : ""} ${isSelected ? "rounded-md bg-[var(--accent)]/10" : ""}`}
     >
-      <div className="invisible flex shrink-0 flex-col items-center gap-0.5 pt-1 group-hover/row:visible">
+      <div className="relative flex shrink-0 flex-col items-center gap-0.5 pt-1 md:invisible md:group-hover/row:visible">
         <button
           type="button"
-          draggable
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSelect(event.shiftKey);
+          }}
+          aria-label="블록 선택"
+          title="Shift+클릭으로 범위 선택"
+          className={`h-4 w-4 rounded border text-[10px] leading-none transition ${isSelected ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:border-[var(--accent)]/60"}`}
+        >
+          {isSelected ? "✓" : ""}
+        </button>
+        <button
+          type="button"
+          draggable={!readOnly}
           onDragStart={(e) => {
+            if (readOnly) {
+              e.preventDefault();
+              return;
+            }
+            dragTriggeredRef.current = true;
             e.dataTransfer.effectAllowed = "move";
             onDragStart();
           }}
-          aria-label="드래그하여 이동"
-          title="드래그하여 이동"
-          className="cursor-grab rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)] active:cursor-grabbing"
+          onDragEnd={() => {
+            setTimeout(() => {
+              dragTriggeredRef.current = false;
+            }, 0);
+          }}
+          onClick={() => {
+            if (readOnly) {
+              return;
+            }
+            if (dragTriggeredRef.current) {
+              return;
+            }
+            setTypeMenuOpen((v) => !v);
+          }}
+          aria-label="블록 이동 및 타입 변경"
+          title="드래그: 이동 · 클릭: 타입 변경"
+          className={`rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)] ${readOnly ? "cursor-not-allowed opacity-50" : "cursor-grab active:cursor-grabbing"}`}
+          disabled={readOnly}
         >
           ⠿
         </button>
 
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setTypeMenuOpen((v) => !v)}
-            aria-label="블록 타입 변경"
-            title="블록 타입 변경"
-            className="rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)]"
+        {typeMenuOpen && (
+          <div
+            className="absolute left-6 top-0 z-50 w-40 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-lg"
           >
-            ⋮
-          </button>
-
-          {typeMenuOpen && (
-            <div
-              className="absolute left-6 top-0 z-50 w-40 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-lg"
-              onMouseLeave={() => setTypeMenuOpen(false)}
-            >
-              {BLOCK_TYPE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.type}
-                  type="button"
-                  onClick={() => { onTypeChange(opt.type); setTypeMenuOpen(false); }}
-                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition hover:bg-[var(--surface-strong)] ${block.type === opt.type ? "font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
-                >
-                  <span className="w-5 text-center font-mono">{opt.icon}</span>
-                  {opt.label}
-                </button>
-              ))}
-              <div className="my-1 border-t border-[var(--border)]" />
+            {BLOCK_TYPE_OPTIONS.map((opt) => (
               <button
+                key={opt.type}
                 type="button"
-                onClick={() => { onDelete(); setTypeMenuOpen(false); }}
-                disabled={total <= 1}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-rose-500 transition hover:bg-rose-50 disabled:opacity-40"
+                onClick={() => { onTypeChange(opt.type); setTypeMenuOpen(false); }}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition hover:bg-[var(--surface-strong)] ${block.type === opt.type ? "font-semibold text-[var(--foreground)]" : "text-[var(--muted)]"}`}
               >
-                <span className="w-5 text-center">🗑</span>
-                삭제
+                <span className="w-5 text-center font-mono">{opt.icon}</span>
+                {opt.label}
               </button>
-            </div>
-          )}
-        </div>
+            ))}
+            <div className="my-1 border-t border-[var(--border)]" />
+            <button
+              type="button"
+              onClick={() => { onDelete(); setTypeMenuOpen(false); }}
+              disabled={total <= 1}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-rose-500 transition hover:bg-rose-50 disabled:opacity-40"
+            >
+              <span className="w-5 text-center">🗑</span>
+              삭제
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="min-w-0 flex-1">
@@ -175,6 +237,7 @@ function BlockRow({
           autoFocus={isEditing}
           onFocus={onFocus}
           onChange={onChange}
+          onFileUpload={onFileUpload}
           onEnter={onEnter}
           onDelete={onDelete}
         />
@@ -195,7 +258,7 @@ function BlockRow({
         )}
       </div>
 
-      <div className="invisible ml-1 flex shrink-0 items-start gap-1 pt-1 group-hover/row:visible">
+      <div className="ml-1 flex shrink-0 items-start gap-1 pt-1 md:invisible md:group-hover/row:visible">
         <div className="relative">
           <button
             type="button"
@@ -234,19 +297,21 @@ function BlockRow({
           </button>
         )}
       </div>
-    </div>
+    </section>
   );
 }
 
 type BlockEditorProps = {
   idea: Idea;
   comments?: Comment[];
+  reactionsByTarget?: Record<string, { reactions: Array<{ emoji: string; count: number }>; mine: string[] }>;
   readOnly?: boolean;
   onSaveBlocks: (blocks: EditorBlockData[]) => Promise<void>;
   onSaveTitle: (title: string) => Promise<void>;
   onSaveStatus?: (status: IdeaStatus) => Promise<void>;
   onOpenBlockComments?: (blockId: string) => void;
   onBlockReaction?: (blockId: string, emoji: string) => void;
+  onUploadFile?: (blockId: string, file: File) => Promise<{ name: string; size: number; type: string; filePath: string; status: string }>;
   STATUS_META: typeof STATUS_META_DEFAULT;
   formatTime: (ts: number) => string;
 };
@@ -254,6 +319,7 @@ type BlockEditorProps = {
 export function BlockEditor({
   idea,
   comments = [],
+  reactionsByTarget = {},
   readOnly = false,
   onSaveBlocks,
   onSaveTitle,
@@ -262,6 +328,7 @@ export function BlockEditor({
   formatTime,
   onOpenBlockComments,
   onBlockReaction,
+  onUploadFile,
 }: BlockEditorProps) {
   const commentsByBlock = comments.reduce<Record<string, number>>((acc, c) => {
     if (c.blockId) acc[c.blockId] = (acc[c.blockId] ?? 0) + 1;
@@ -272,6 +339,10 @@ export function BlockEditor({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [selectedBlockIds, setSelectedBlockIds] = useState<string[]>([]);
+  const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
+  const selectedIdSet = useMemo(() => new Set(selectedBlockIds), [selectedBlockIds]);
+  const selectedCount = selectedBlockIds.length;
 
   const saveAll = useCallback(async () => {
     await Promise.all([onSaveBlocks(blocks), onSaveTitle(title)]);
@@ -286,20 +357,28 @@ export function BlockEditor({
 
   const addBlock = useCallback(
     (afterIndex: number, type: BlockType = "paragraph") => {
+      if (readOnly) {
+        return;
+      }
       const newBlock: EditorBlockData = { id: genId(), type, content: "" };
       setBlocks((prev) => {
         const next = [...prev];
         next.splice(afterIndex + 1, 0, newBlock);
         return next;
       });
+      setSelectedBlockIds([]);
+      setSelectionAnchor(null);
       setEditingIndex(afterIndex + 1);
       markDirty();
     },
-    [markDirty]
+    [markDirty, readOnly]
   );
 
   const handleChange = useCallback(
     (index: number, content: string, type?: BlockType) => {
+      if (readOnly) {
+        return;
+      }
       setBlocks((prev) => {
         const next = [...prev];
         next[index] = { ...next[index], content, ...(type ? { type } : {}) };
@@ -307,25 +386,35 @@ export function BlockEditor({
       });
       markDirty();
     },
-    [markDirty]
+    [markDirty, readOnly]
   );
 
   const handleDelete = useCallback(
     (index: number) => {
+      if (readOnly) {
+        return;
+      }
       setBlocks((prev) => {
         if (prev.length <= 1) return [{ id: genId(), type: "paragraph", content: "" }];
         const next = [...prev];
+        const removed = next[index];
         next.splice(index, 1);
+        if (removed) {
+          setSelectedBlockIds((ids) => ids.filter((id) => id !== removed.id));
+        }
         return next;
       });
       setEditingIndex(Math.max(0, index - 1));
       markDirty();
     },
-    [markDirty]
+    [markDirty, readOnly]
   );
 
   const handleTypeChange = useCallback(
     (index: number, type: BlockType) => {
+      if (readOnly) {
+        return;
+      }
       setBlocks((prev) => {
         const next = [...prev];
         next[index] = { ...next[index], type };
@@ -333,11 +422,14 @@ export function BlockEditor({
       });
       markDirty();
     },
-    [markDirty]
+    [markDirty, readOnly]
   );
 
   const handleDrop = useCallback(
     (dropIndex: number) => {
+      if (readOnly) {
+        return;
+      }
       if (dragIndex === null || dragIndex === dropIndex) return;
       setBlocks((prev) => {
         const next = [...prev];
@@ -350,10 +442,108 @@ export function BlockEditor({
       setDragOverIndex(null);
       markDirty();
     },
-    [dragIndex, markDirty]
+    [dragIndex, markDirty, readOnly]
   );
 
   const statusMeta = STATUS_META[idea.status] ?? { icon: "💡", label: idea.status };
+
+  const toggleBlockSelection = useCallback(
+    (index: number, shiftKey: boolean) => {
+      if (readOnly) {
+        return;
+      }
+      const target = blocks[index];
+      if (!target) {
+        return;
+      }
+      if (shiftKey && selectionAnchor !== null && blocks[selectionAnchor]) {
+        const start = Math.min(selectionAnchor, index);
+        const end = Math.max(selectionAnchor, index);
+        const rangeIds = blocks.slice(start, end + 1).map((item) => item.id);
+        setSelectedBlockIds((prev) => Array.from(new Set([...prev, ...rangeIds])));
+      } else {
+        setSelectedBlockIds((prev) => (prev.includes(target.id) ? prev.filter((id) => id !== target.id) : [...prev, target.id]));
+        setSelectionAnchor(index);
+      }
+      setEditingIndex(index);
+    },
+    [blocks, readOnly, selectionAnchor]
+  );
+
+  const clearSelection = useCallback(() => {
+    setSelectedBlockIds([]);
+    setSelectionAnchor(null);
+  }, []);
+
+  const selectAllBlocks = useCallback(() => {
+    if (readOnly) {
+      return;
+    }
+    setSelectedBlockIds(blocks.map((item) => item.id));
+    setSelectionAnchor(0);
+  }, [blocks, readOnly]);
+
+  const deleteSelectedBlocks = useCallback(() => {
+    if (readOnly || selectedCount === 0) {
+      return;
+    }
+    setBlocks((prev) => {
+      const selected = new Set(selectedBlockIds);
+      const next = prev.filter((item) => !selected.has(item.id));
+      if (next.length === 0) {
+        return [{ id: genId(), type: "paragraph", content: "" }];
+      }
+      return next;
+    });
+    setSelectedBlockIds([]);
+    setSelectionAnchor(null);
+    setEditingIndex(0);
+    markDirty();
+  }, [markDirty, readOnly, selectedBlockIds, selectedCount]);
+
+  const changeSelectedType = useCallback(
+    (type: BlockType) => {
+      if (readOnly || selectedCount === 0) {
+        return;
+      }
+      const selected = new Set(selectedBlockIds);
+      setBlocks((prev) => prev.map((item) => (selected.has(item.id) ? { ...item, type } : item)));
+      markDirty();
+    },
+    [markDirty, readOnly, selectedBlockIds, selectedCount]
+  );
+
+  const moveSelected = useCallback(
+    (direction: "up" | "down") => {
+      if (readOnly || selectedCount === 0) {
+        return;
+      }
+      const selected = new Set(selectedBlockIds);
+      setBlocks((prev) => {
+        const next = [...prev];
+        if (direction === "up") {
+          for (let idx = 1; idx < next.length; idx += 1) {
+            if (selected.has(next[idx].id) && !selected.has(next[idx - 1].id)) {
+              const current = next[idx];
+              next[idx] = next[idx - 1];
+              next[idx - 1] = current;
+            }
+          }
+        } else {
+          for (let idx = next.length - 2; idx >= 0; idx -= 1) {
+            if (selected.has(next[idx].id) && !selected.has(next[idx + 1].id)) {
+              const current = next[idx];
+              next[idx] = next[idx + 1];
+              next[idx + 1] = current;
+            }
+          }
+        }
+        return next;
+      });
+      markDirty();
+    },
+    [markDirty, readOnly, selectedBlockIds, selectedCount]
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -387,7 +577,14 @@ export function BlockEditor({
             <select
               className="rounded border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-xs text-[var(--foreground)]"
               value={idea.status}
-              onChange={(e) => { onSaveStatus(e.target.value as IdeaStatus); markDirty(); }}
+              onChange={(e) => {
+                if (readOnly) {
+                  return;
+                }
+                onSaveStatus(e.target.value as IdeaStatus);
+                markDirty();
+              }}
+              disabled={readOnly}
             >
               {Object.entries(STATUS_META).map(([key, meta]) => (
                 <option key={key} value={key}>{meta.icon} {meta.label}</option>
@@ -402,63 +599,127 @@ export function BlockEditor({
         </div>
       </div>
 
-      <div
+      <section
         className="flex-1 overflow-auto px-4 pb-20 md:px-8"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={() => { setDragIndex(null); setDragOverIndex(null); }}
-        role="region"
-        aria-label="블록 에디터"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) setEditingIndex(blocks.length - 1);
-        }}
-        onKeyDown={(e) => {
-          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
-            setEditingIndex(blocks.length - 1);
+        onDragOver={(event) => {
+          event.preventDefault();
+          const target = (event.target as HTMLElement).closest("[data-block-index]") as HTMLElement | null;
+          if (!target) {
+            return;
+          }
+          const raw = Number(target.dataset.blockIndex);
+          if (Number.isInteger(raw) && raw >= 0) {
+            setDragOverIndex(raw);
           }
         }}
-        tabIndex={0}
+        onDrop={() => {
+          if (dragOverIndex !== null) {
+            handleDrop(dragOverIndex);
+          }
+          setDragIndex(null);
+          setDragOverIndex(null);
+        }}
+        aria-label="블록 에디터"
       >
-        {blocks.map((block, index) => (
+        {!readOnly ? (
+          <div className="sticky top-0 z-20 mb-2 flex flex-wrap items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs">
+            <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={selectAllBlocks}>전체 선택</button>
+            <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={clearSelection} disabled={selectedCount === 0}>선택 해제</button>
+            <span className="rounded bg-[var(--surface-strong)] px-2 py-1 text-[var(--muted)]">{`선택 ${selectedCount}`}</span>
+            <div className="ml-auto flex flex-wrap items-center gap-1">
+              <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={() => moveSelected("up")} disabled={selectedCount === 0}>위로</button>
+              <button type="button" className="rounded border border-[var(--border)] px-2 py-1" onClick={() => moveSelected("down")} disabled={selectedCount === 0}>아래로</button>
+              <select
+                className="h-7 rounded border border-[var(--border)] bg-[var(--surface)] px-1"
+                defaultValue=""
+                onChange={(event) => {
+                  const value = event.target.value as BlockType;
+                  if (value) {
+                    changeSelectedType(value);
+                    event.currentTarget.value = "";
+                  }
+                }}
+                disabled={selectedCount === 0}
+              >
+                <option value="">타입 변경</option>
+                {BLOCK_TYPE_OPTIONS.map((opt) => (
+                  <option key={`batch-type-${opt.type}`} value={opt.type}>{opt.label}</option>
+                ))}
+              </select>
+              <button type="button" className="rounded border border-rose-200 px-2 py-1 text-rose-600" onClick={deleteSelectedBlocks} disabled={selectedCount === 0}>삭제</button>
+            </div>
+          </div>
+        ) : null}
+
+        {blocks.map((block, index) => {
+          const reactionSummary = reactionsByTarget[`block:${block.id}`] || { reactions: [], mine: [] };
+          const blockReactions = (reactionSummary.reactions || []).map((item) => ({
+            emoji: item.emoji,
+            count: Number(item.count || 0),
+            mine: (reactionSummary.mine || []).includes(item.emoji)
+          }));
+
+          return (
           <BlockRow
             key={block.id}
             block={block}
             index={index}
             total={blocks.length}
-            isEditing={editingIndex === index}
+            isEditing={!readOnly && editingIndex === index}
             isDragOver={dragOverIndex === index}
+            isSelected={selectedIdSet.has(block.id)}
+            readOnly={readOnly}
             commentCount={commentsByBlock[block.id] ?? 0}
-            blockReactions={[]}
-            onFocus={() => setEditingIndex(index)}
+            blockReactions={blockReactions}
+            onFocus={() => {
+              if (!readOnly) {
+                setEditingIndex(index);
+              }
+            }}
+            onToggleSelect={(shiftKey) => toggleBlockSelection(index, shiftKey)}
             onChange={(content, type) => handleChange(index, content, type)}
             onEnter={() => addBlock(index)}
             onDelete={() => handleDelete(index)}
             onTypeChange={(type) => handleTypeChange(index, type)}
             onDragStart={() => setDragIndex(index)}
-            onDragOver={() => setDragOverIndex(index)}
-            onDrop={() => handleDrop(index)}
             onOpenComments={() => onOpenBlockComments?.(block.id)}
             onReaction={(emoji) => onBlockReaction?.(block.id, emoji)}
+            onFileUpload={async (file) => {
+              if (readOnly) {
+                return;
+              }
+              if (!onUploadFile) {
+                handleChange(index, JSON.stringify({ name: file.name, size: file.size, type: file.type, status: "uploaded" }));
+                return;
+              }
+              handleChange(index, JSON.stringify({ name: file.name, size: file.size, type: file.type, status: "uploading" }), "file");
+              try {
+                const uploaded = await onUploadFile(block.id, file);
+                handleChange(index, JSON.stringify(uploaded), "file");
+              } catch {
+                handleChange(index, JSON.stringify({ name: file.name, size: file.size, type: file.type, status: "failed" }), "file");
+              }
+            }}
           />
-        ))}
+          );
+        })}
 
-        <div
-          role="button"
-          tabIndex={0}
-          className="min-h-[60px] cursor-text py-2"
-          onClick={() => {
-            const last = blocks.length - 1;
-            if (blocks[last]?.content === "" && blocks[last]?.type === "paragraph") {
-              setEditingIndex(last);
-            } else {
-              addBlock(last);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") addBlock(blocks.length - 1);
-          }}
-          aria-label="새 블록 추가"
-        />
-      </div>
+        {!readOnly ? (
+          <button
+            type="button"
+            className="min-h-[60px] cursor-text py-2"
+            onClick={() => {
+              const last = blocks.length - 1;
+              if (blocks[last]?.content === "" && blocks[last]?.type === "paragraph") {
+                setEditingIndex(last);
+              } else {
+                addBlock(last);
+              }
+            }}
+            aria-label="새 블록 추가"
+          />
+        ) : null}
+      </section>
     </div>
   );
 }

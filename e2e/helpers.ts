@@ -8,6 +8,22 @@ export async function loginAsLocalTester(page: Page) {
   await page.getByPlaceholder("비밀번호").fill("mumur1234!");
   await loginForm.getByRole("button", { name: "로그인" }).click();
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+
+  const workspacesRes = await page.request.get("/api/workspaces");
+  expect(workspacesRes.ok()).toBeTruthy();
+  const workspacesBody = await workspacesRes.json();
+  const editableWorkspace = Array.isArray(workspacesBody?.workspaces)
+    ? workspacesBody.workspaces.find((workspace: { id: number; role?: string | null }) => workspace?.role && workspace.role !== "viewer")
+    : null;
+
+  if (editableWorkspace?.id) {
+    const switchRes = await page.request.post("/api/workspaces/switch", {
+      data: { teamId: Number(editableWorkspace.id) },
+    });
+    expect(switchRes.ok()).toBeTruthy();
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  }
 }
 
 export async function createIdeaViaApi(page: Page, title: string) {

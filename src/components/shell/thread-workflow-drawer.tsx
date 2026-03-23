@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DrawerShell } from "@/components/ui/drawer-shell";
@@ -54,14 +55,25 @@ export function ThreadWorkflowDrawer({
   activeThreadMentionOptionId,
   handleMentionKeyDown,
   threadComments,
-  formatTime
+  formatTime,
+  currentUserId,
+  myRole,
+  canEditIdea,
+  handleUpdateThreadComment,
+  handleDeleteThreadComment,
+  reactionsByTarget,
+  handleReaction
 }) {
+  const canModerate = myRole === "admin" || myRole === "owner";
+  const canMutate = canEditIdea && myRole !== "viewer";
+  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
+  const [editingCommentDraft, setEditingCommentDraft] = useState("");
+
   return (
     <DrawerShell
       open={open}
       onClose={onClose}
       title="토론 스레드"
-      description="스레드 생성, 상태 관리, 댓글 협업을 한 화면에서 처리합니다"
       widthClass="max-w-3xl"
     >
       <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
@@ -89,22 +101,34 @@ export function ThreadWorkflowDrawer({
           </div>
         </div>
 
-        <form className="grid gap-2" onSubmit={handleCreateThread}>
+        <form
+          className="grid gap-2"
+          onSubmit={(event) => {
+            if (!canMutate) {
+              event.preventDefault();
+              return;
+            }
+            void handleCreateThread(event);
+          }}
+        >
           <Input
             placeholder="제목"
             value={threadForm.title}
             onChange={(event) => setThreadForm((prev) => ({ ...prev, title: event.target.value }))}
+            disabled={!canMutate}
             required
           />
           <Input
             placeholder="설명"
             value={threadForm.description}
             onChange={(event) => setThreadForm((prev) => ({ ...prev, description: event.target.value }))}
+            disabled={!canMutate}
           />
           <select
             className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
             value={threadForm.status}
             onChange={(event) => setThreadForm((prev) => ({ ...prev, status: event.target.value }))}
+            disabled={!canMutate}
           >
             {THREAD_STATUS.map((status) => (
               <option key={status} value={status}>
@@ -112,7 +136,7 @@ export function ThreadWorkflowDrawer({
               </option>
             ))}
           </select>
-          <Button type="submit">스레드 생성</Button>
+          <Button type="submit" disabled={!canMutate}>스레드 생성</Button>
         </form>
 
         <div className="grid gap-2">
@@ -150,13 +174,23 @@ export function ThreadWorkflowDrawer({
 
         {selectedThread ? (
           <>
-            <form className="grid gap-2" onSubmit={handleUpdateThread}>
-              <Input value={threadEdit.title} onChange={(event) => setThreadEdit((prev) => ({ ...prev, title: event.target.value }))} required />
-              <Input value={threadEdit.description} onChange={(event) => setThreadEdit((prev) => ({ ...prev, description: event.target.value }))} />
+            <form
+              className="grid gap-2"
+              onSubmit={(event) => {
+                if (!canMutate) {
+                  event.preventDefault();
+                  return;
+                }
+                void handleUpdateThread(event);
+              }}
+            >
+              <Input value={threadEdit.title} onChange={(event) => setThreadEdit((prev) => ({ ...prev, title: event.target.value }))} disabled={!canMutate} required />
+              <Input value={threadEdit.description} onChange={(event) => setThreadEdit((prev) => ({ ...prev, description: event.target.value }))} disabled={!canMutate} />
               <select
                 className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
                 value={threadEdit.status}
                 onChange={(event) => setThreadEdit((prev) => ({ ...prev, status: event.target.value }))}
+                disabled={!canMutate}
               >
                 {THREAD_STATUS.map((status) => (
                   <option key={status} value={status}>
@@ -168,11 +202,21 @@ export function ThreadWorkflowDrawer({
                 value={threadEdit.conclusion}
                 placeholder="결론"
                 onChange={(event) => setThreadEdit((prev) => ({ ...prev, conclusion: event.target.value }))}
+                disabled={!canMutate}
               />
-              <Button type="submit">스레드 업데이트</Button>
+              <Button type="submit" disabled={!canMutate}>스레드 업데이트</Button>
             </form>
 
-            <form className="flex gap-2" onSubmit={handleAddThreadComment}>
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                if (!canMutate) {
+                  event.preventDefault();
+                  return;
+                }
+                void handleAddThreadComment(event);
+              }}
+            >
               <Input
                 className="flex-1"
                 placeholder="스레드 댓글 (@email 또는 @이름공백없이 멘션)"
@@ -183,7 +227,7 @@ export function ThreadWorkflowDrawer({
                 aria-expanded={threadMentionMatches.length > 0}
                 aria-controls={threadMentionMatches.length ? threadMentionListboxId : undefined}
                 aria-activedescendant={threadMentionMatches.length ? activeThreadMentionOptionId : undefined}
-                aria-describedby={threadMentionMatches.length ? `thread-mention-help ${threadMentionStatusId}` : undefined}
+                aria-describedby={threadMentionMatches.length ? threadMentionStatusId : undefined}
                 onChange={(event) => {
                   setThreadCommentDraft(event.target.value);
                   setThreadMentionIndex(0);
@@ -198,9 +242,10 @@ export function ThreadWorkflowDrawer({
                     threadCommentDraft
                   )
                 }
+                disabled={!canMutate}
                 required
               />
-              <Button type="submit">등록</Button>
+              <Button type="submit" disabled={!canMutate}>등록</Button>
             </form>
 
             <MentionAssistPanel
@@ -217,7 +262,7 @@ export function ThreadWorkflowDrawer({
               activeOptionId={activeThreadMentionOptionId}
               announcement={threadMentionAnnouncement}
               helpId="thread-mention-help"
-              helpText="멘션 자동완성 (화살표/엔터/탭 지원)"
+              helpText=""
               listboxLabel="스레드 멘션 후보"
               previewTitle="멘션 대상 미리보기"
             />
@@ -226,8 +271,101 @@ export function ThreadWorkflowDrawer({
               {threadComments.length ? (
                 threadComments.map((comment) => (
                   <div key={comment.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                    <p className="text-sm font-medium text-[var(--foreground)]">{comment.userName}</p>
-                    <p className="text-sm text-[var(--foreground)]">{comment.content}</p>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-[var(--foreground)]">{comment.userName}</p>
+                      {canEditIdea && (comment.userId === currentUserId || canModerate) ? (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingCommentId(comment.id);
+                              setEditingCommentDraft(comment.content || "");
+                            }}
+                          >
+                            수정
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={async () => {
+                              if (confirm("이 스레드 댓글을 삭제할까요?")) {
+                                await handleDeleteThreadComment(comment.id);
+                                if (editingCommentId === comment.id) {
+                                  setEditingCommentId(null);
+                                  setEditingCommentDraft("");
+                                }
+                              }
+                            }}
+                          >
+                            삭제
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {editingCommentId === comment.id ? (
+                      <div className="space-y-2">
+                        <Input
+                          value={editingCommentDraft}
+                          onChange={(event) => setEditingCommentDraft(event.target.value)}
+                          placeholder="스레드 댓글 수정"
+                        />
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={async () => {
+                              const next = editingCommentDraft.trim();
+                              if (!next) {
+                                return;
+                              }
+                              await handleUpdateThreadComment(comment.id, next);
+                              setEditingCommentId(null);
+                              setEditingCommentDraft("");
+                            }}
+                          >
+                            저장
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingCommentId(null);
+                              setEditingCommentDraft("");
+                            }}
+                          >
+                            취소
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-[var(--foreground)]">{comment.content}</p>
+                    )}
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      {["👍", "🔥", "✅"].map((emoji) => {
+                        const targetId = `thread:${comment.id}`;
+                        const key = `comment:${targetId}`;
+                        const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
+                        const item = (summary.reactions || []).find((row) => row.emoji === emoji);
+                        const mine = (summary.mine || []).includes(emoji);
+                        return (
+                            <Button
+                              key={`thread-comment-reaction-${comment.id}-${emoji}`}
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className={mine ? "border-[var(--accent)]" : undefined}
+                              onClick={() => handleReaction(emoji, "comment", targetId)}
+                              disabled={!canMutate}
+                            >
+                              {emoji} {item?.count || 0}
+                            </Button>
+                        );
+                      })}
+                    </div>
                     <p className="text-xs text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
                   </div>
                 ))

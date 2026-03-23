@@ -9,10 +9,10 @@ import { MumurNavigationSidebar } from "@/components/shell/mumur-navigation-side
 import { DashboardSurface, IdeasSurface, TeamSurface } from "@/components/shell/workspace-pages";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GROWTH_PRESET_STATUSES, IDEA_STATUS, STATUS_META } from "@/lib/idea-status";
-import { streamStatusLabel } from "@/lib/ui-labels";
+import { dequeueIdeaSync, enqueueIdeaSync, listIdeaSyncQueue, loadIdeaDraft, removeIdeaDraft, saveIdeaDraft } from "@/lib/local-first";
+import type { WorkspaceMe, WorkspaceRole } from "@/types";
 
 const THREAD_STATUS = ["active", "resolved", "on_hold"];
-const BLOCK_TYPES = ["heading", "text", "quote", "checklist", "table", "image", "embed", "code", "divider"];
 const DEFAULT_VOTES = {
   binary: { approve: 0, reject: 0, total: 0 },
   score: { average: 0, total: 0, distribution: [1, 2, 3, 4, 5].map((score) => ({ score, count: 0 })) },
@@ -25,8 +25,11 @@ const NOTIFICATION_TYPES = [
   "thread.comment.created",
   "vote.created",
   "version.created",
+  "version.restored",
   "integration.webhook.updated"
 ];
+
+type LocalSyncState = "synced" | "pending" | "syncing" | "failed";
 
 async function api(path: string, options: RequestInit = {}) {
   const response = await fetch(path, {
@@ -45,7 +48,7 @@ async function api(path: string, options: RequestInit = {}) {
   return json;
 }
 
-function blockSeed(type = "text") {
+function blockSeed(type = "paragraph") {
   return {
     id: `block-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     type,
@@ -61,11 +64,47 @@ function formatTime(value) {
   return new Date(value).toLocaleString();
 }
 
+function toMillisFromDateInput(value: string, endOfDay = false) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  const date = endOfDay ? new Date(`${raw}T23:59:59.999`) : new Date(`${raw}T00:00:00.000`);
+  const ts = date.getTime();
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function syncStateLabel(state: LocalSyncState) {
+  if (state === "pending") {
+    return "로컬 저장 대기";
+  }
+  if (state === "syncing") {
+    return "동기화 중";
+  }
+  if (state === "failed") {
+    return "동기화 실패";
+  }
+  return "동기화 완료";
+}
+
+function dedupePresenceUsers(users: Array<{ userId: number; name?: string }>) {
+  const map = new Map<number, { userId: number; name: string }>();
+  users.forEach((user) => {
+    const userId = Number(user?.userId);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return;
+    }
+    map.set(userId, { userId, name: String(user?.name || "사용자") });
+  });
+  return Array.from(map.values());
+}
+
 export default function HomePage() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [createIdeaDialogOpen, setCreateIdeaDialogOpen] = useState(false);
@@ -76,7 +115,20 @@ export default function HomePage() {
   const [loginForm, setLoginForm] = useState({ email: "localtester@mumur.local", password: "mumur1234!" });
   const [registerForm, setRegisterForm] = useState({ name: "", email: "", password: "", teamName: "" });
 
-  const [filters, setFilters] = useState({ status: "", query: "", category: "" });
+  const [filters, setFilters] = useState({
+    scope: "all",
+    workspaceId: "",
+    status: "",
+    query: "",
+    category: "",
+    priority: "",
+    authorId: "",
+    participantId: "",
+    createdFrom: "",
+    createdTo: "",
+    updatedFrom: "",
+    updatedTo: ""
+  });
   const [ideaView, setIdeaView] = useState("card");
   const [navigatorSort, setNavigatorSort] = useState("recent");
   const [navigatorPreset, setNavigatorPreset] = useState("all");
@@ -92,6 +144,7 @@ export default function HomePage() {
   const [commentFilterBlockId, setCommentFilterBlockId] = useState("");
 
   const [reactions, setReactions] = useState({ reactions: [], mine: [] });
+  const [reactionsByTarget, setReactionsByTarget] = useState<Record<string, { reactions: Array<{ emoji: string; count: number }>; mine: string[] }>>({});
   const [votes, setVotes] = useState(DEFAULT_VOTES);
 
   const [threads, setThreads] = useState([]);
@@ -108,7 +161,7 @@ export default function HomePage() {
 
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [streamStatus, setStreamStatus] = useState("offline");
+  const [, setStreamStatus] = useState("offline");
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
   const [utilitySection, setUtilitySection] = useState("notifications");
   const [notificationFilters, setNotificationFilters] = useState({
@@ -123,8 +176,9 @@ export default function HomePage() {
   const [deliveries, setDeliveries] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
   const [userTeams, setUserTeams] = useState([]);
-  const [teamMemberForm, setTeamMemberForm] = useState({ email: "", role: "member" });
-  const [teamMe, setTeamMe] = useState({ userId: null, isOwner: false });
+  const [teamMemberForm, setTeamMemberForm] = useState({ email: "", role: "editor" });
+  const [teamMe, setTeamMe] = useState<WorkspaceMe>({ userId: null, isOwner: false, role: null });
+  const [presenceUsers, setPresenceUsers] = useState<Array<{ userId: number; name: string }>>([]);
   const [teamInvitations, setTeamInvitations] = useState([]);
   const [teamInvitationMessage, setTeamInvitationMessage] = useState("");
   const [webhookForm, setWebhookForm] = useState({ platform: "slack", webhookUrl: "", enabled: false });
@@ -136,6 +190,7 @@ export default function HomePage() {
     danger: false,
     action: null
   });
+  const [localSyncState, setLocalSyncState] = useState<LocalSyncState>("synced");
 
   const streamRef = useRef(null);
   const reconnectTimerRef = useRef(null);
@@ -144,6 +199,7 @@ export default function HomePage() {
   const utilityTriggerRef = useRef(null);
 
   const authed = useMemo(() => Boolean(session?.user), [session]);
+  const activeWorkspaceId = Number(session?.workspace?.id) || null;
   const selectedThread = useMemo(() => threads.find((item) => item.id === selectedThreadId) || null, [threads, selectedThreadId]);
 
   const sortedIdeas = useMemo(() => {
@@ -194,17 +250,52 @@ export default function HomePage() {
     return [...new Set([...ranked, ...dynamic])];
   }, [ideas]);
 
+  const explorerAuthorOptions = useMemo(() => {
+    const byId = new Map<number, { id: number; name: string }>();
+    ideas.forEach((idea) => {
+      const authorId = Number(idea.authorId);
+      if (!Number.isInteger(authorId) || authorId <= 0) {
+        return;
+      }
+      if (!byId.has(authorId)) {
+        byId.set(authorId, { id: authorId, name: String(idea.authorName || `사용자 ${authorId}`) });
+      }
+    });
+    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [ideas]);
+
   const sideIdeas = useMemo(() => {
     return presetIdeas.filter((idea) => {
+      if (filters.workspaceId && Number(idea.teamId || idea.workspaceId || 0) !== Number(filters.workspaceId)) {
+        return false;
+      }
       if (filters.status && idea.status !== filters.status) {
         return false;
       }
       if (filters.category && idea.category !== filters.category) {
         return false;
       }
+      if (filters.priority && String(idea.priorityLevel || "") !== String(filters.priority)) {
+        return false;
+      }
+      if (filters.authorId && Number(idea.authorId || 0) !== Number(filters.authorId)) {
+        return false;
+      }
+      if (filters.participantId) {
+        const participantId = Number(filters.participantId);
+        const participants = Array.isArray(idea.participantIds) ? idea.participantIds : [];
+        if (!participants.includes(participantId) && Number(idea.authorId || 0) !== participantId) {
+          return false;
+        }
+      }
       if (filters.query) {
         const query = String(filters.query).toLowerCase();
-        return String(idea.title || "").toLowerCase().includes(query) || String(idea.category || "").toLowerCase().includes(query);
+        return (
+          String(idea.title || "").toLowerCase().includes(query) ||
+          String(idea.category || "").toLowerCase().includes(query) ||
+          String(idea.authorName || "").toLowerCase().includes(query) ||
+          String(idea.workspaceName || "").toLowerCase().includes(query)
+        );
       }
       return true;
     });
@@ -237,6 +328,7 @@ export default function HomePage() {
     }
     reconnectTryRef.current = 0;
     setStreamStatus("offline");
+    setPresenceUsers([]);
   }, []);
 
   const pushNotification = useCallback((notification) => {
@@ -253,7 +345,7 @@ export default function HomePage() {
 
   const connectStream = useCallback(() => {
     disconnectStream();
-    if (!authed) {
+    if (!authed || !activeWorkspaceId) {
       return;
     }
 
@@ -275,6 +367,33 @@ export default function HomePage() {
         pushNotification(payload);
       });
 
+      source.addEventListener("presence", (event) => {
+        const payload = JSON.parse(event.data || "{}");
+        const eventType = String(payload?.type || "");
+        if (eventType === "snapshot") {
+          const users = Array.isArray(payload?.users) ? payload.users : [];
+          setPresenceUsers(dedupePresenceUsers(users));
+          return;
+        }
+
+        const incoming = {
+          userId: Number(payload?.userId),
+          name: String(payload?.name || "사용자")
+        };
+        if (!Number.isInteger(incoming.userId) || incoming.userId <= 0) {
+          return;
+        }
+
+        if (eventType === "user.joined") {
+          setPresenceUsers((prev) => dedupePresenceUsers([...prev, incoming]));
+          return;
+        }
+
+        if (eventType === "user.left") {
+          setPresenceUsers((prev) => prev.filter((item) => item.userId !== incoming.userId));
+        }
+      });
+
       source.onerror = () => {
         setStreamStatus("offline");
         if (streamRef.current) {
@@ -293,7 +412,7 @@ export default function HomePage() {
     };
 
     open();
-  }, [authed, disconnectStream, pushNotification]);
+  }, [activeWorkspaceId, authed, disconnectStream, pushNotification]);
 
   const loadDashboard = useCallback(async () => {
     const data = await api("/api/dashboard/summary");
@@ -337,7 +456,7 @@ export default function HomePage() {
   const loadTeamMembers = useCallback(async () => {
     const data = await api("/api/workspace/members");
     setTeamMembers(data.members || []);
-    setTeamMe(data.me || { userId: null, isOwner: false });
+    setTeamMe(data.me || { userId: null, isOwner: false, role: null });
   }, []);
 
   const loadUserTeams = useCallback(async () => {
@@ -361,7 +480,7 @@ export default function HomePage() {
       body: JSON.stringify(payload)
     });
     setTeamInvitationMessage(data.invitation?.message || "초대 처리 완료");
-    setTeamMemberForm({ email: "", role: "member" });
+    setTeamMemberForm({ email: "", role: "editor" });
     await Promise.all([loadTeamMembers(), loadTeamInvitations()]);
   }, [loadTeamInvitations, loadTeamMembers, teamMemberForm]);
 
@@ -436,6 +555,10 @@ export default function HomePage() {
 
   const loadIdeas = useCallback(async (nextFilters = filters) => {
     const params = new URLSearchParams();
+    params.set("scope", nextFilters.scope || "all");
+    if (nextFilters.workspaceId) {
+      params.set("workspaceId", nextFilters.workspaceId);
+    }
     if (nextFilters.status) {
       params.set("status", nextFilters.status);
     }
@@ -445,11 +568,65 @@ export default function HomePage() {
     if (nextFilters.query) {
       params.set("query", nextFilters.query);
     }
+    if (nextFilters.priority) {
+      params.set("priority", nextFilters.priority);
+    }
+    if (nextFilters.authorId) {
+      params.set("authorId", nextFilters.authorId);
+    }
+    if (nextFilters.participantId) {
+      params.set("participantId", nextFilters.participantId);
+    }
+    const createdFrom = toMillisFromDateInput(nextFilters.createdFrom, false);
+    const createdTo = toMillisFromDateInput(nextFilters.createdTo, true);
+    const updatedFrom = toMillisFromDateInput(nextFilters.updatedFrom, false);
+    const updatedTo = toMillisFromDateInput(nextFilters.updatedTo, true);
+    if (createdFrom) {
+      params.set("createdFrom", String(createdFrom));
+    }
+    if (createdTo) {
+      params.set("createdTo", String(createdTo));
+    }
+    if (updatedFrom) {
+      params.set("updatedFrom", String(updatedFrom));
+    }
+    if (updatedTo) {
+      params.set("updatedTo", String(updatedTo));
+    }
 
     const data = await api(`/api/ideas?${params.toString()}`);
     setIdeas(data.ideas || []);
     return data.ideas || [];
   }, [filters]);
+
+  const loadReactionTargets = useCallback(async (ideaId, targets: Array<{ targetType: string; targetId: string }>) => {
+    const uniq = Array.from(
+      new Map(
+        targets
+          .filter((item) => item.targetType && item.targetId)
+          .map((item) => [`${item.targetType}:${item.targetId}`, item])
+      ).values()
+    );
+    if (!uniq.length) {
+      return;
+    }
+    const rows = await Promise.all(
+      uniq.map(async ({ targetType, targetId }) => {
+        const data = await api(`/api/ideas/${ideaId}/reactions?targetType=${targetType}&targetId=${encodeURIComponent(targetId)}`);
+        return { key: `${targetType}:${targetId}`, data };
+      })
+    );
+    setReactionsByTarget((prev) => {
+      const next = { ...prev };
+      rows.forEach((row) => {
+        next[row.key] = {
+          reactions: row.data.reactions || [],
+          mine: row.data.mine || []
+        };
+      });
+      return next;
+    });
+  }, []);
 
   const applyQuickStatusFilter = useCallback(
     async (status) => {
@@ -462,7 +639,7 @@ export default function HomePage() {
   );
 
   const loadIdeaChildren = useCallback(
-    async (ideaId) => {
+    async (ideaId, blockList: Array<{ id?: string }> | null = null) => {
       const commentsQuery = commentFilterBlockId ? `?blockId=${encodeURIComponent(commentFilterBlockId)}` : "";
 
       const [commentRes, reactionRes, versionRes, timelineRes, threadRes, voteRes] = await Promise.all([
@@ -482,25 +659,81 @@ export default function HomePage() {
       setThreads(nextThreads);
       setVotes(voteRes.votes || DEFAULT_VOTES);
 
+      const blockTargets = (blockList || selectedIdea?.blocks || [])
+        .map((block) => String(block?.id || ""))
+        .filter(Boolean)
+        .map((targetId) => ({ targetType: "block", targetId }));
+
       if (nextThreads.length) {
         const nextId = nextThreads.some((item) => item.id === selectedThreadId) ? selectedThreadId : nextThreads[0].id;
         setSelectedThreadId(nextId);
         const detail = nextThreads.find((item) => item.id === nextId) || null;
         syncThreadEditor(detail);
         const threadCommentRes = await api(`/api/ideas/${ideaId}/threads/${nextId}/comments`);
-        setThreadComments(threadCommentRes.comments || []);
+        const nextThreadComments = threadCommentRes.comments || [];
+        setThreadComments(nextThreadComments);
+        await loadReactionTargets(
+          ideaId,
+          [
+            ...blockTargets,
+            ...(commentRes.comments || []).map((comment) => ({ targetType: "comment", targetId: `idea:${comment.id}` })),
+            ...nextThreadComments.map((comment) => ({ targetType: "comment", targetId: `thread:${comment.id}` }))
+          ]
+        );
       } else {
         setSelectedThreadId(null);
         setThreadComments([]);
         syncThreadEditor(null);
+        await loadReactionTargets(
+          ideaId,
+          [
+            ...blockTargets,
+            ...(commentRes.comments || []).map((comment) => ({ targetType: "comment", targetId: `idea:${comment.id}` }))
+          ]
+        );
       }
     },
-    [commentFilterBlockId, selectedThreadId, syncThreadEditor]
+    [commentFilterBlockId, loadReactionTargets, selectedIdea?.blocks, selectedThreadId, syncThreadEditor]
   );
 
   const selectIdea = useCallback(
-    async (ideaId, options: { syncUrl?: boolean; openPage?: boolean } = { syncUrl: true, openPage: true }) => {
+    async (
+      ideaId,
+      options: { syncUrl?: boolean; openPage?: boolean; workspaceId?: number | null } = { syncUrl: true, openPage: true }
+    ) => {
+      if (options.workspaceId && Number(options.workspaceId) !== Number(session?.workspace?.id)) {
+        const switched = await api("/api/workspaces/switch", {
+          method: "POST",
+          body: JSON.stringify({ teamId: Number(options.workspaceId) })
+        });
+        setSession((prev) => {
+          if (!prev) {
+            return prev;
+          }
+          return {
+            ...prev,
+            workspace: {
+              id: switched?.workspace?.id,
+              name: switched?.workspace?.name
+            }
+          };
+        });
+        await Promise.all([
+          loadTeamMembers(),
+          loadTeamInvitations(),
+          loadNotifications(),
+          loadDashboard(),
+          loadIdeas(filters)
+        ]);
+      }
       const data = await api(`/api/ideas/${ideaId}`);
+      try {
+        const draft = await loadIdeaDraft(Number(ideaId));
+        if (draft && Number(draft.updatedAt || 0) > Number(data.idea.updatedAt || 0)) {
+          data.idea = { ...data.idea, ...draft.payload, updatedAt: draft.updatedAt };
+          setLocalSyncState("pending");
+        }
+      } catch {}
       setSelectedIdeaId(ideaId);
       setSelectedIdea(data.idea);
       setStudioTab("editor");
@@ -508,14 +741,23 @@ export default function HomePage() {
       if (options.openPage !== false) {
         setActivePage("detail");
       }
-      await loadIdeaChildren(ideaId);
+      await loadIdeaChildren(ideaId, data.idea?.blocks || []);
       if (options.syncUrl !== false && typeof window !== "undefined") {
         const params = new URLSearchParams(window.location.search);
         params.set("idea", String(ideaId));
         window.history.replaceState(null, "", `?${params.toString()}`);
       }
     },
-    [loadIdeaChildren]
+    [
+      filters,
+      loadDashboard,
+      loadIdeaChildren,
+      loadIdeas,
+      loadNotifications,
+      loadTeamInvitations,
+      loadTeamMembers,
+      session?.workspace?.id
+    ]
   );
 
   const bootstrap = useCallback(async () => {
@@ -620,6 +862,13 @@ export default function HomePage() {
     };
   }, [authed, ideas, selectIdea, selectedIdeaId]);
 
+  useEffect(() => {
+    if (!authed) {
+      return;
+    }
+    void loadIdeas(filters);
+  }, [authed, filters, loadIdeas]);
+
   const handleLogin = async (event) => {
     event.preventDefault();
     setBusy(true);
@@ -663,7 +912,8 @@ export default function HomePage() {
       setCreateIdeaDialogOpen(false);
       setTeamMembers([]);
       setUserTeams([]);
-      setTeamMe({ userId: null, isOwner: false });
+      setTeamMe({ userId: null, isOwner: false, role: null });
+      setPresenceUsers([]);
       setTeamInvitations([]);
       setTeamInvitationMessage("");
       setNotifications([]);
@@ -709,154 +959,121 @@ export default function HomePage() {
     setSelectedIdea((prev) => (prev ? { ...prev, [field]: value } : prev));
   };
 
-  const updateBlock = (index, patch) => {
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      const blocks = [...(prev.blocks || [])];
-      blocks[index] = { ...blocks[index], ...patch };
-      return { ...prev, blocks };
-    });
-  };
-
-  const addBlock = (type = "text") => {
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      return { ...prev, blocks: [...(prev.blocks || []), blockSeed(type)] };
-    });
-  };
-
-  const applySlashCommand = (index, rawContent) => {
-    if (typeof rawContent !== "string") {
+  const drainIdeaSyncQueue = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.onLine) {
       return;
     }
-    const normalized = rawContent.trimStart();
-    if (!normalized.startsWith("/")) {
+
+    let queue = [];
+    try {
+      queue = await listIdeaSyncQueue();
+    } catch {
+      setLocalSyncState("failed");
       return;
     }
-    const [command, ...rest] = normalized.slice(1).trim().split(/\s+/);
-    if (!command || !BLOCK_TYPES.includes(command)) {
+    if (!queue.length) {
+      setLocalSyncState("synced");
       return;
     }
-    const nextContent = rest.join(" ").trim();
-    updateBlock(index, { type: command, content: nextContent });
-  };
 
-  const removeBlock = (index) => {
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
+    setLocalSyncState("syncing");
+    for (const row of queue) {
+      try {
+        const updated = await api(`/api/ideas/${row.ideaId}`, {
+          method: "PUT",
+          body: JSON.stringify(row.payload)
+        });
+        try {
+          await dequeueIdeaSync(row.ideaId);
+          await removeIdeaDraft(row.ideaId);
+        } catch {}
+        setIdeas((prev) => prev.map((idea) => (idea.id === updated.idea.id ? { ...idea, ...updated.idea } : idea)));
+        if (Number(selectedIdeaId) === Number(row.ideaId)) {
+          setSelectedIdea(updated.idea);
+        }
+      } catch {
+        setLocalSyncState("failed");
+        return;
       }
-      const blocks = [...(prev.blocks || [])];
-      const removed = blocks.splice(index, 1)[0];
-      if (removed && commentBlockId === removed.id) {
-        setCommentBlockId("");
-      }
-      return { ...prev, blocks };
-    });
-  };
-
-  const moveBlockUp = (index) => {
-    if (index <= 0) {
-      return;
     }
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      const blocks = [...(prev.blocks || [])];
-      [blocks[index - 1], blocks[index]] = [blocks[index], blocks[index - 1]];
-      return { ...prev, blocks };
-    });
-  };
 
-  const moveBlockDown = (index) => {
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      const blocks = [...(prev.blocks || [])];
-      if (index < 0 || index >= blocks.length - 1) {
-        return prev;
-      }
-      [blocks[index], blocks[index + 1]] = [blocks[index + 1], blocks[index]];
-      return { ...prev, blocks };
-    });
-  };
+    setLocalSyncState("synced");
+    await Promise.all([loadDashboard(), loadIdeas()]);
+    if (selectedIdeaId) {
+      await loadIdeaChildren(selectedIdeaId);
+    }
+  }, [loadDashboard, loadIdeaChildren, loadIdeas, selectedIdeaId]);
 
-  const duplicateBlock = (index) => {
-    setSelectedIdea((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      const blocks = [...(prev.blocks || [])];
-      const target = blocks[index];
-      if (!target) {
-        return prev;
-      }
-      const duplicated = {
-        ...target,
-        id: `b-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-      };
-      blocks.splice(index + 1, 0, duplicated);
-      return { ...prev, blocks };
-    });
-  };
-
-  const handleSaveIdea = async (event) => {
-    event.preventDefault();
+  const handleSaveIdea = async (
+    event: { preventDefault?: () => void } | null = null,
+    patch: Partial<{ title: string; category: string; status: import("@/types").IdeaStatus; blocks: Array<{ id: string; type: string; content: string; checked: boolean }> }> = {}
+  ) => {
+    event?.preventDefault?.();
     if (!selectedIdea) {
       return;
     }
+    const payload = {
+      title: patch.title ?? selectedIdea.title,
+      category: patch.category ?? selectedIdea.category,
+      status: patch.status ?? selectedIdea.status,
+      blocks: patch.blocks ?? selectedIdea.blocks ?? []
+    };
+    const now = Date.now();
+    setSelectedIdea((prev) => (prev ? { ...prev, ...payload, updatedAt: now } : prev));
+    try {
+      await saveIdeaDraft(Number(selectedIdea.id), payload, now);
+      setLocalSyncState("pending");
+    } catch {
+      setLocalSyncState("failed");
+    }
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      try {
+        await enqueueIdeaSync(Number(selectedIdea.id), payload, now);
+      } catch {
+        setError("오프라인 저장 큐를 만들지 못했습니다. 연결 후 다시 시도해주세요.");
+      }
+      return;
+    }
+
     setBusy(true);
     try {
+      setLocalSyncState("syncing");
       const updated = await api(`/api/ideas/${selectedIdea.id}`, {
         method: "PUT",
-        body: JSON.stringify({
-          title: selectedIdea.title,
-          category: selectedIdea.category,
-          status: selectedIdea.status,
-          blocks: selectedIdea.blocks || []
-        })
+        body: JSON.stringify(payload)
       });
+      try {
+        await dequeueIdeaSync(Number(selectedIdea.id));
+        await removeIdeaDraft(Number(selectedIdea.id));
+      } catch {}
       setSelectedIdea(updated.idea);
-      await loadIdeas();
-      await loadIdeaChildren(updated.idea.id);
+      setIdeas((prev) => prev.map((idea) => (idea.id === updated.idea.id ? { ...idea, ...updated.idea } : idea)));
+      await loadIdeaChildren(updated.idea.id, updated.idea?.blocks || []);
       await loadDashboard();
+      setLocalSyncState("synced");
     } catch (err) {
+      try {
+        await enqueueIdeaSync(Number(selectedIdea.id), payload, now);
+      } catch {}
+      setLocalSyncState("failed");
       setError(err.message || "아이디어 저장에 실패했습니다");
     } finally {
       setBusy(false);
     }
   };
 
-  const handleGenerateSummary = async () => {
-    if (!selectedIdea) {
+  useEffect(() => {
+    if (!authed) {
       return;
     }
-    setBusy(true);
-    try {
-      const data = await api(`/api/ideas/${selectedIdea.id}/summary`, { method: "POST" });
-      setSelectedIdea((prev) => (prev ? { ...prev, aiSummary: data.aiSummary } : prev));
-      await loadTimelineAndIdeas();
-      await loadDashboard();
-    } catch (err) {
-      setError(err.message || "요약 생성에 실패했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const loadTimelineAndIdeas = async () => {
-    if (!selectedIdeaId) {
-      return;
-    }
-    const [timelineRes] = await Promise.all([api(`/api/ideas/${selectedIdeaId}/timeline`), loadIdeas()]);
-    setTimeline(timelineRes.timeline || []);
-  };
+    const onOnline = () => {
+      void drainIdeaSyncQueue();
+    };
+    window.addEventListener("online", onOnline);
+    void drainIdeaSyncQueue();
+    return () => window.removeEventListener("online", onOnline);
+  }, [authed, drainIdeaSyncQueue]);
 
   const handleCreateComment = async (event) => {
     event.preventDefault();
@@ -874,6 +1091,41 @@ export default function HomePage() {
       await loadDashboard();
     } catch (err) {
       setError(err.message || "댓글 등록에 실패했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpdateComment = async (commentId, content) => {
+    if (!selectedIdeaId) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/api/ideas/${selectedIdeaId}/comments/${commentId}`, {
+        method: "PUT",
+        body: JSON.stringify({ content })
+      });
+      await loadIdeaChildren(selectedIdeaId);
+      await loadDashboard();
+    } catch (err) {
+      setError(err.message || "댓글 수정에 실패했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteComment = async (commentId) => {
+    if (!selectedIdeaId) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/api/ideas/${selectedIdeaId}/comments/${commentId}`, { method: "DELETE" });
+      await loadIdeaChildren(selectedIdeaId);
+      await loadDashboard();
+    } catch (err) {
+      setError(err.message || "댓글 삭제에 실패했습니다");
     } finally {
       setBusy(false);
     }
@@ -903,7 +1155,19 @@ export default function HomePage() {
         body: JSON.stringify({ emoji, targetType, targetId })
       });
       const data = await api(`/api/ideas/${selectedIdeaId}/reactions?targetType=${targetType}&targetId=${encodeURIComponent(targetId)}`);
-      setReactions(data);
+      if (targetType === "idea" && !targetId) {
+        setReactions(data);
+      } else {
+        setReactionsByTarget((prev) => ({
+          ...prev,
+          [`${targetType}:${targetId}`]: {
+            reactions: data.reactions || [],
+            mine: data.mine || []
+          }
+        }));
+        const ideaData = await api(`/api/ideas/${selectedIdeaId}/reactions`);
+        setReactions(ideaData);
+      }
       await loadIdeas();
     } catch (err) {
       setError(err.message || "리액션 처리에 실패했습니다");
@@ -987,6 +1251,63 @@ export default function HomePage() {
     }
   };
 
+  const handleUpdateThreadComment = async (commentId, content) => {
+    if (!selectedIdeaId || !selectedThreadId) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments/${commentId}`, {
+        method: "PUT",
+        body: JSON.stringify({ content })
+      });
+      const res = await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`);
+      setThreadComments(res.comments || []);
+      await loadIdeaChildren(selectedIdeaId);
+    } catch (err) {
+      setError(err.message || "스레드 댓글 수정에 실패했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteThreadComment = async (commentId) => {
+    if (!selectedIdeaId || !selectedThreadId) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments/${commentId}`, {
+        method: "DELETE"
+      });
+      const res = await api(`/api/ideas/${selectedIdeaId}/threads/${selectedThreadId}/comments`);
+      setThreadComments(res.comments || []);
+      await loadIdeaChildren(selectedIdeaId);
+    } catch (err) {
+      setError(err.message || "스레드 댓글 삭제에 실패했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUploadBlockFile = async (blockId, file) => {
+    if (!selectedIdeaId) {
+      throw new Error("아이디어를 찾을 수 없습니다");
+    }
+    const form = new FormData();
+    form.append("file", file);
+    const data = await api(`/api/ideas/${selectedIdeaId}/blocks/${blockId}/file`, {
+      method: "POST",
+      body: form
+    });
+    if (data.idea) {
+      setSelectedIdea(data.idea);
+      setIdeas((prev) => prev.map((idea) => (idea.id === data.idea.id ? { ...idea, ...data.idea } : idea)));
+      await loadIdeaChildren(data.idea.id);
+    }
+    return data.fileBlock;
+  };
+
   const handleCreateVersion = async (event) => {
     event.preventDefault();
     if (!selectedIdeaId) {
@@ -996,7 +1317,7 @@ export default function HomePage() {
     try {
       const form = new FormData();
       form.append("versionLabel", versionForm.versionLabel);
-      form.append("notes", versionForm.notes);
+      form.append("notes", JSON.stringify(selectedIdea?.blocks || []));
       if (versionFile) {
         form.append("file", versionFile);
       }
@@ -1007,6 +1328,32 @@ export default function HomePage() {
       await loadDashboard();
     } catch (err) {
       setError(err.message || "버전 등록에 실패했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestoreVersion = async (versionId: number) => {
+    if (!selectedIdeaId) {
+      return false;
+    }
+    setBusy(true);
+    try {
+      const data = await api(`/api/ideas/${selectedIdeaId}/versions/${versionId}/restore`, { method: "POST" });
+      if (data?.idea) {
+        setSelectedIdea(data.idea);
+        setIdeas((prev) => prev.map((idea) => (idea.id === data.idea.id ? { ...idea, ...data.idea } : idea)));
+        await loadIdeaChildren(data.idea.id, data.idea.blocks || []);
+      } else {
+        await loadIdeaChildren(selectedIdeaId);
+      }
+      try {
+        await loadDashboard();
+      } catch {}
+      return true;
+    } catch (err) {
+      setError(err.message || "타임라인 복원에 실패했습니다");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1039,6 +1386,11 @@ export default function HomePage() {
 
   const handleSaveWebhook = async (event) => {
     event.preventDefault();
+    const canManageWebhooks = Boolean(teamMe?.isOwner || teamMe?.role === "admin" || teamMe?.role === "owner");
+    if (!canManageWebhooks) {
+      setError("admin 권한에서만 웹훅을 수정할 수 있습니다");
+      return;
+    }
     if (!webhookForm.webhookUrl.trim()) {
       return;
     }
@@ -1092,8 +1444,17 @@ export default function HomePage() {
     if (!teamId || Number(teamId) === Number(session?.workspace?.id)) {
       return;
     }
+    setWorkspaceSwitching(true);
     setBusy(true);
     try {
+      setActivePage("ideas");
+      setSelectedIdeaId(null);
+      setSelectedIdea(null);
+      setComments([]);
+      setThreads([]);
+      setThreadComments([]);
+      setVersions([]);
+      setTimeline([]);
       await api("/api/workspaces/switch", {
         method: "POST",
         body: JSON.stringify({ teamId })
@@ -1103,8 +1464,36 @@ export default function HomePage() {
       setError(err.message || "팀 전환에 실패했습니다");
     } finally {
       setBusy(false);
+      setWorkspaceSwitching(false);
     }
   };
+
+  const leaveWorkspace = useCallback(
+    async (workspaceId: number) => {
+      const result = await api(`/api/workspaces/${workspaceId}/leave`, { method: "POST" });
+      await Promise.all([loadUserTeams(), loadTeamMembers(), loadTeamInvitations()]);
+      if (Number(session?.workspace?.id) === Number(workspaceId) || Number(result?.nextWorkspaceId || 0) > 0) {
+        await bootstrap();
+      } else {
+        await Promise.all([loadDashboard(), loadIdeas()]);
+      }
+    },
+    [bootstrap, loadDashboard, loadIdeas, loadTeamInvitations, loadTeamMembers, loadUserTeams, session?.workspace?.id]
+  );
+
+  const requestLeaveWorkspace = useCallback(
+    (workspace) => {
+      setConfirmDialog({
+        open: true,
+        title: "워크스페이스를 탈퇴할까요?",
+        description: `"${workspace.name}"에서 나가면 해당 워크스페이스의 아이디어 접근 권한이 사라집니다.`,
+        confirmText: "탈퇴",
+        danger: true,
+        action: async () => leaveWorkspace(workspace.id)
+      });
+    },
+    [leaveWorkspace]
+  );
 
   const backToIdeas = () => {
     setSelectedIdeaId(null);
@@ -1127,14 +1516,32 @@ export default function HomePage() {
           return;
         }
         if (sideIdeas.length) {
-          await selectIdea(sideIdeas[0].id, { syncUrl: true, openPage: true });
+          await selectIdea(sideIdeas[0].id, { syncUrl: true, openPage: true, workspaceId: sideIdeas[0].teamId });
           return;
         }
+        setActivePage("ideas");
+        return;
+      }
+
+      setSelectedIdeaId(null);
+      setSelectedIdea(null);
+      setStudioTab("editor");
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        params.delete("idea");
+        const query = params.toString();
+        window.history.pushState(null, "", query ? `?${query}` : "/");
       }
       setActivePage(page);
     },
     [selectedIdeaId, selectIdea, sideIdeas]
   );
+
+  useEffect(() => {
+    if (activePage === "detail" && !selectedIdeaId) {
+      setActivePage("ideas");
+    }
+  }, [activePage, selectedIdeaId]);
 
   const openUtilityPanel = useCallback((event, section = "notifications") => {
     utilityTriggerRef.current = event.currentTarget;
@@ -1162,7 +1569,19 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [notificationPanelOpen, closeUtilityPanel]);
 
+  useEffect(() => {
+    if (activePage !== "detail" || studioTab !== "editor" || !selectedIdeaId) {
+      return;
+    }
+    const raf = window.requestAnimationFrame(() => {
+      const titleInput = document.querySelector("main textarea") as HTMLTextAreaElement | null;
+      titleInput?.focus();
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [activePage, selectedIdeaId, studioTab]);
+
   const blocks = selectedIdea?.blocks || [];
+  const canEditIdea = Boolean(teamMe.role) && teamMe.role !== "viewer";
 
   return (
     <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -1233,20 +1652,24 @@ export default function HomePage() {
                 onCreateWorkspace={handleCreateWorkspace}
                 onUpdateWorkspace={handleUpdateWorkspace}
                 onDeleteWorkspace={handleDeleteWorkspace}
+                switchingWorkspace={workspaceSwitching}
               />
             </div>
 
             <section className="flex-1 overflow-auto">
               <div className="mx-auto w-full max-w-6xl px-4 pt-14 pb-7 md:px-10 md:pt-7">
                 <div className="mb-5 flex flex-wrap items-center gap-2">
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`연결 ${streamStatusLabel(streamStatus)}`}</span>
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`안읽음 ${unreadCount}`}</span>
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{session?.workspace?.name || "팀"}</span>
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">{`동기화 ${syncStateLabel(localSyncState)}`}</span>
+                  {workspaceSwitching ? (
+                    <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--muted)]">워크스페이스 전환 중...</span>
+                  ) : null}
                   <div className="ml-auto flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => setCreateIdeaDialogOpen(true)}
+                      disabled={!canEditIdea}
                       className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white"
+                      title={canEditIdea ? "새 아이디어" : "viewer 권한에서는 아이디어를 생성할 수 없습니다"}
                     >
                       + 새 아이디어
                     </button>
@@ -1295,8 +1718,11 @@ export default function HomePage() {
                     dashboard={dashboard}
                     ideas={sideIdeas}
                     STATUS_META={STATUS_META}
-                    onSelectIdea={selectIdea}
+                    onSelectIdea={(ideaId, workspaceId) => selectIdea(ideaId, { workspaceId })}
                     formatTime={formatTime}
+                    workspaceName={session?.workspace?.name || "워크스페이스"}
+                    onOpenCreateIdea={() => setCreateIdeaDialogOpen(true)}
+                    canCreateIdea={canEditIdea}
                   />
                 ) : null}
 
@@ -1314,9 +1740,12 @@ export default function HomePage() {
                     presetCounts={presetCounts}
                     STATUS_META={STATUS_META}
                     onQuickStatusFilter={applyQuickStatusFilter}
-                    onSelectIdea={selectIdea}
+                    onSelectIdea={(ideaId, workspaceId) => selectIdea(ideaId, { workspaceId })}
                     onOpenCreateIdea={() => setCreateIdeaDialogOpen(true)}
+                    canCreateIdea={canEditIdea}
                     categoryOptions={categoryOptions}
+                    workspaceOptions={userTeams}
+                    authorOptions={explorerAuthorOptions}
                     formatTime={formatTime}
                   />
                 ) : null}
@@ -1324,36 +1753,26 @@ export default function HomePage() {
                 {activePage === "detail" ? (
                   <IdeaStudioPanel
                     selectedIdea={selectedIdea}
-                    ideas={sideIdeas}
-                    selectIdea={selectIdea}
                     onBackToList={backToIdeas}
                     studioTab={studioTab}
                     setStudioTab={setStudioTab}
-                    IDEA_STATUS={IDEA_STATUS}
                     STATUS_META={STATUS_META}
-                    busy={busy}
                     handleSaveIdea={handleSaveIdea}
                     updateSelectedIdeaField={updateSelectedIdeaField}
-                    addBlock={addBlock}
-                    applySlashCommand={applySlashCommand}
                     blocks={blocks}
-                    BLOCK_TYPES={BLOCK_TYPES}
-                    updateBlock={updateBlock}
-                    moveBlockUp={moveBlockUp}
-                    moveBlockDown={moveBlockDown}
-                    duplicateBlock={duplicateBlock}
-                    removeBlock={removeBlock}
                     setCommentBlockId={setCommentBlockId}
-                    handleGenerateSummary={handleGenerateSummary}
                     commentDraft={commentDraft}
                     setCommentDraft={setCommentDraft}
                     handleCreateComment={handleCreateComment}
+                    handleUpdateComment={handleUpdateComment}
+                    handleDeleteComment={handleDeleteComment}
                     commentBlockId={commentBlockId}
                     comments={comments}
                     commentFilterBlockId={commentFilterBlockId}
                     setCommentFilterBlockId={setCommentFilterBlockId}
                     applyCommentFilter={applyCommentFilter}
                     reactions={reactions}
+                    reactionsByTarget={reactionsByTarget}
                     handleReaction={handleReaction}
                     votes={votes}
                     handleVote={handleVote}
@@ -1378,12 +1797,19 @@ export default function HomePage() {
                     threadComments={threadComments}
                     formatTime={formatTime}
                     handleCreateVersion={handleCreateVersion}
+                    handleRestoreVersion={handleRestoreVersion}
                     versionForm={versionForm}
                     setVersionForm={setVersionForm}
-                    setVersionFile={setVersionFile}
                     versions={versions}
                     timeline={timeline}
                     teamMembers={teamMembers}
+                    presenceUsers={presenceUsers}
+                    myRole={teamMe.role as WorkspaceRole | null}
+                    canEditIdea={canEditIdea}
+                    currentUserId={teamMe.userId}
+                    handleUpdateThreadComment={handleUpdateThreadComment}
+                    handleDeleteThreadComment={handleDeleteThreadComment}
+                    handleUploadBlockFile={handleUploadBlockFile}
                   />
                 ) : null}
 
@@ -1417,6 +1843,10 @@ export default function HomePage() {
               />
               <div className="absolute right-0 top-0 h-full w-full max-w-xl overflow-auto border-l border-[var(--border)] bg-[var(--surface)] p-4 shadow-2xl">
                 <ContextPanel
+                  activePage={activePage}
+                  selectedIdea={selectedIdea}
+                  studioTab={studioTab}
+                  setStudioTab={setStudioTab}
                   dashboard={dashboard}
                   utilitySection={utilitySection}
                   setUtilitySection={setUtilitySection}
@@ -1442,8 +1872,8 @@ export default function HomePage() {
                   activeTeamId={session?.workspace?.id || null}
                   teamMe={teamMe}
                   onSwitchTeam={handleSwitchTeam}
-                  teamInvitations={teamInvitations}
                   teamInvitationMessage={teamInvitationMessage}
+                  onLeaveWorkspace={requestLeaveWorkspace}
                   onOpenTeamPage={() => {
                     closeUtilityPanel();
                     setActivePage("team");

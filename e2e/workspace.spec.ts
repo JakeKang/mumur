@@ -1,25 +1,25 @@
 import { expect, test } from "@playwright/test";
 import { loginAsLocalTester } from "./helpers";
 
-test("workspace can be created via API and appears in sidebar", async ({ page }) => {
+test("workspace can be created and appears in sidebar", async ({ page }) => {
   await loginAsLocalTester(page);
+  const workspaceName = `E2E Workspace ${Date.now()}`;
 
-  const res = await page.request.post("/api/workspaces", {
-    data: { teamName: "E2E Workspace", icon: "🚀", color: "#0ea5e9" },
-  });
-  expect(res.ok()).toBeTruthy();
+  await page.getByRole("button", { name: "새 워크스페이스", exact: true }).click();
+  await page.getByPlaceholder("워크스페이스 이름").fill(workspaceName);
+  await page.getByRole("button", { name: "저장" }).click();
 
-  await page.reload();
-  await expect(page.getByText("E2E Workspace").first()).toBeVisible();
+  const workspaceButton = page.getByRole("button", { name: workspaceName });
+  await expect(workspaceButton.first()).toBeVisible({ timeout: 10000 });
 });
 
 test("sidebar shows main navigation items", async ({ page }) => {
   await loginAsLocalTester(page);
 
   await expect(page.getByRole("button", { name: "대시보드" }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "아이디어 목록" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "전체 아이디어" }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "팀 관리" }).first()).toBeVisible();
-  await expect(page.getByText("워크스페이스")).toBeVisible();
+  await expect(page.getByText("워크스페이스", { exact: true })).toBeVisible();
 });
 
 test("mobile hamburger menu is present at mobile viewport", async ({ page }) => {
@@ -29,7 +29,6 @@ test("mobile hamburger menu is present at mobile viewport", async ({ page }) => 
   const hamburger = page.locator("button[aria-label='메뉴 열기']");
   await expect(hamburger).toBeVisible();
   await hamburger.click();
-  await page.waitForTimeout(400);
 
   await expect(page.getByRole("button", { name: "대시보드" }).first()).toBeVisible();
 });

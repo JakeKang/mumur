@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { db, ensureDir } from "@/lib/server/db";
+import { ensureDir } from "@/lib/server/db";
+import { getDatabaseClient, getQueryAdapter } from "@/lib/server/database-client";
 import {
   SESSION_COOKIE,
   clearExpiredSessions,
@@ -17,11 +18,14 @@ import { notificationTypeLabel, threadStatusLabel, voteTypeLabel } from "@/lib/u
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const BLOCK_TYPES = ["heading", "text", "quote", "checklist", "code", "divider"];
+const db = getDatabaseClient();
+const queries = getQueryAdapter();
+
+const BLOCK_TYPES = ["paragraph", "heading1", "heading2", "heading3", "bulletList", "numberedList", "checklist", "quote", "code", "divider", "file"];
 const THREAD_STATUS = ["active", "resolved", "on_hold"];
 const VOTE_TYPES = { binary: "binary", score: "score" };
 const WEBHOOK_PLATFORMS = ["slack", "discord"];
-const TEAM_ROLES = ["owner", "member"];
+const TEAM_ROLES = ["viewer", "editor", "deleter", "admin", "owner", "member"];
 const encoder = new TextEncoder();
 
 type StreamClient = { controller: ReadableStreamDefaultController; userId: number };
@@ -56,15 +60,39 @@ function toIdeaPayload(row) {
 
 function parseBlocks(inputBlocks) {
   const blocks = Array.isArray(inputBlocks) ? inputBlocks : [];
+
+  const normalizeBlockType = (value) => {
+    const raw = normalizeText(value);
+    if (!raw) {
+      return "paragraph";
+    }
+    if (BLOCK_TYPES.includes(raw)) {
+      return raw;
+    }
+    if (raw === "text") {
+      return "paragraph";
+    }
+    if (raw === "heading") {
+      return "heading2";
+    }
+    if (raw === "image") {
+      return "file";
+    }
+    if (raw === "table" || raw === "embed") {
+      return "paragraph";
+    }
+    return "paragraph";
+  };
+
   return blocks
     .map((block, index) => {
-      const type = BLOCK_TYPES.includes(block?.type) ? block.type : "text";
+      const type = normalizeBlockType(block?.type);
       const id = normalizeText(block?.id) || `block-${index + 1}-${Date.now()}`;
       const content = type === "divider" ? "" : normalizeText(block?.content);
       const checked = Boolean(block?.checked);
       return { id, type, content, checked };
     })
-    .filter((block) => block.type === "divider" || block.content.length > 0);
+    .filter((block) => block.type === "divider" || block.type === "file" || block.content.length > 0);
 }
 
 function pickTeamForUser(userId) {
@@ -133,6 +161,8 @@ function formatNotificationMessage(eventType, payload) {
       return `리액션 제거 ${data.emoji || ""}`;
     case "version.created":
       return `기획서 버전 등록: ${data.versionLabel || "새 버전"}`;
+    case "version.restored":
+      return `타임라인 복원: ${data.sourceVersionLabel || data.versionLabel || data.from || "스냅샷"}`;
     case "mention.created":
       return data.targetName
         ? `${data.actorName || "누군가"}님이 ${data.targetName}님을 멘션했습니다`
@@ -385,9 +415,13 @@ function enqueueWebhookDeliveries(teamId, eventId) {
 
   const now = Date.now();
   hooks.forEach((hook) => {
-    db.prepare(
-      "INSERT OR IGNORE INTO webhook_deliveries (webhook_id, event_id, status, attempts, max_attempts, next_attempt_at, last_error, created_at, updated_at, delivered_at) VALUES (?, ?, 'pending', 0, 5, ?, NULL, ?, ?, NULL)"
-    ).run(hook.id, eventId, now, now, now);
+    queries.insertWebhookDeliveryIfMissing({
+      webhookId: hook.id,
+      eventId,
+      nextAttemptAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
   });
 
   ensureWebhookWorker();
@@ -403,8 +437,9 @@ function recordTeamEvent(teamId, ideaId, userId, eventType, payload) {
     .run(teamId, ideaId, userId, eventType, JSON.stringify(payload || {}), createdAt);
 
   const actor = userId ? db.prepare("SELECT name FROM users WHERE id = ?").get(userId)?.name || "시스템" : "시스템";
+  const eventId = queries.extractInsertId(result);
   const notification = {
-    id: Number(result.lastInsertRowid),
+    id: eventId,
     teamId,
     ideaId,
     userId,
@@ -417,7 +452,7 @@ function recordTeamEvent(teamId, ideaId, userId, eventType, payload) {
   };
 
   broadcastTeamNotification(teamId, notification);
-  enqueueWebhookDeliveries(teamId, Number(result.lastInsertRowid));
+  enqueueWebhookDeliveries(teamId, eventId);
 }
 
 function buildVoteSummary(ideaId, userId) {
@@ -478,7 +513,7 @@ function getSessionToken(request) {
 }
 
 function authContext(request) {
-  clearExpiredSessions(db);
+  clearExpiredSessions(queries);
   const token = getSessionToken(request);
   if (!token) {
     return null;
@@ -520,11 +555,23 @@ function hasMinRole(teamId: number, userId: number, minRole: string): boolean {
 }
 
 function isTeamOwner(teamId, userId) {
-  return hasMinRole(teamId, userId, "admin");
+  const membership = getTeamMembership(teamId, userId);
+  return membership?.role === "owner";
 }
 
 function ownerCount(teamId) {
-  return db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE team_id = ? AND role IN ('owner','admin')").get(teamId).count;
+  return db.prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE team_id = ? AND role = 'owner'").get(teamId).count;
+}
+
+function ideaPriorityLevel(row) {
+  const engagement = Number(row.comment_count || 0) + Number(row.reaction_count || 0) + Number(row.version_count || 0);
+  if (row.status === "harvest" || engagement >= 24) {
+    return "high";
+  }
+  if (row.status === "grow" || engagement >= 10) {
+    return "medium";
+  }
+  return "low";
 }
 
 function toInvitationPayload(row) {
@@ -601,19 +648,19 @@ async function handleRequest(request, slug, method) {
 
     const now = Date.now();
     const passwordHash = hashPassword(password);
-    const created = db.transaction(() => {
+    const created = queries.withTransaction(() => {
       const userResult = db
         .prepare("INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)")
         .run(name, email, passwordHash, now);
-      const userId = Number(userResult.lastInsertRowid);
+      const userId = queries.extractInsertId(userResult);
       const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, userId, now, now);
-      const teamId = Number(teamResult.lastInsertRowid);
+      const teamId = queries.extractInsertId(teamResult);
       db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, userId, "owner", now);
       recordTeamEvent(teamId, null, userId, "workspace.created", { teamName });
       return { userId, teamId };
-    })();
+    });
 
-    const session = createSession(db, created.userId, created.teamId);
+      const session = createSession(queries, created.userId, created.teamId);
     const response = json({ user: { id: created.userId, name, email }, workspace: { id: created.teamId, name: teamName } }, 201);
     return withSessionCookie(response, session.token, session.expiresAt);
   }
@@ -633,7 +680,7 @@ async function handleRequest(request, slug, method) {
       return json({ error: "소속된 팀이 없습니다" }, 403);
     }
 
-    const session = createSession(db, user.id, team.teamId);
+      const session = createSession(queries, user.id, team.teamId);
     const response = json({
       user: { id: user.id, name: user.name, email: user.email },
       workspace: { id: team.teamId, name: team.teamName }
@@ -700,7 +747,7 @@ async function handleRequest(request, slug, method) {
     }
     const now = Date.now();
     const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, ctx.user.id, now, now);
-    const teamId = Number(teamResult.lastInsertRowid);
+    const teamId = queries.extractInsertId(teamResult);
     db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, ctx.user.id, "owner", now);
     db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(teamId, ctx.session.id);
     recordTeamEvent(teamId, null, ctx.user.id, "workspace.created", { teamName });
@@ -760,6 +807,65 @@ async function handleRequest(request, slug, method) {
     return json({ workspace: { id: team.id, name: team.name, ownerId: team.owner_id, role: membership.role } });
   }
 
+  if (s[0] === "workspaces" && s[1] && s[2] === "leave" && method === "POST") {
+    const workspaceId = Number(s[1]);
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+      return json({ error: "유효하지 않은 워크스페이스 ID입니다" }, 400);
+    }
+
+    const membership = db
+      .prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?")
+      .get(workspaceId, ctx.user.id);
+    if (!membership) {
+      return json({ error: "소속된 워크스페이스가 아닙니다" }, 404);
+    }
+
+    const memberCount = db
+      .prepare("SELECT COUNT(*) AS count FROM workspace_members WHERE user_id = ?")
+      .get(ctx.user.id).count;
+    if (memberCount <= 1) {
+      return json({ error: "마지막 워크스페이스에서는 탈퇴할 수 없습니다" }, 400);
+    }
+
+    if (membership.role === "owner" && ownerCount(workspaceId) <= 1) {
+      return json({ error: "마지막 소유자는 탈퇴할 수 없습니다" }, 400);
+    }
+
+    const workspace = db.prepare("SELECT id, owner_id FROM workspaces WHERE id = ?").get(workspaceId);
+    if (!workspace) {
+      return json({ error: "워크스페이스를 찾을 수 없습니다" }, 404);
+    }
+
+    if (Number(workspace.owner_id) === Number(ctx.user.id)) {
+      const fallbackOwner = db
+        .prepare(
+          "SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id != ? AND role = 'owner' ORDER BY created_at ASC LIMIT 1"
+        )
+        .get(workspaceId, ctx.user.id);
+      if (!fallbackOwner?.user_id) {
+        return json({ error: "워크스페이스 소유권을 이전할 수 없어 탈퇴할 수 없습니다" }, 400);
+      }
+      db.prepare("UPDATE workspaces SET owner_id = ?, updated_at = ? WHERE id = ?").run(fallbackOwner.user_id, Date.now(), workspaceId);
+    }
+
+    db.prepare("DELETE FROM workspace_members WHERE team_id = ? AND user_id = ?").run(workspaceId, ctx.user.id);
+    recordTeamEvent(workspaceId, null, ctx.user.id, "team.member.left", { userId: ctx.user.id });
+
+    let nextWorkspaceId = ctx.session.teamId;
+    if (Number(ctx.session.teamId) === workspaceId) {
+      const nextMembership = db
+        .prepare("SELECT team_id FROM workspace_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1")
+        .get(ctx.user.id);
+      if (!nextMembership?.team_id) {
+        return json({ error: "전환할 워크스페이스를 찾을 수 없습니다" }, 500);
+      }
+      nextWorkspaceId = Number(nextMembership.team_id);
+      db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(nextWorkspaceId, ctx.session.id);
+    }
+
+    return json({ ok: true, nextWorkspaceId });
+  }
+
   if (s[0] === "workspace" && s[1] === "members" && s.length === 2 && method === "GET") {
     const members = db
       .prepare(
@@ -785,18 +891,19 @@ async function handleRequest(request, slug, method) {
       members,
       me: {
         userId: ctx.user.id,
-        isOwner: isTeamOwner(ctx.session.teamId, ctx.user.id)
+        isOwner: isTeamOwner(ctx.session.teamId, ctx.user.id),
+        role: members.find((member) => member.userId === ctx.user.id)?.role || "member"
       }
     });
   }
 
   if (s[0] === "workspace" && s[1] === "members" && s.length === 2 && method === "POST") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const body = await readJsonBody(request);
     const email = normalizeText(body.email).toLowerCase();
-    const role = normalizeText(body.role) || "member";
+    const role = normalizeText(body.role) || "editor";
     if (!email) {
       return json({ error: "이메일은 필수입니다" }, 400);
     }
@@ -831,7 +938,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "members" && s[2] && method === "PUT") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const targetUserId = Number(s[2]);
@@ -853,7 +960,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "members" && s[2] && method === "DELETE") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const targetUserId = Number(s[2]);
@@ -887,13 +994,13 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "invitations" && s.length === 2 && method === "POST") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
 
     const body = await readJsonBody(request);
     const email = normalizeText(body.email).toLowerCase();
-    const role = normalizeText(body.role) || "member";
+    const role = normalizeText(body.role) || "editor";
     if (!email) {
       return json({ error: "이메일은 필수입니다" }, 400);
     }
@@ -952,7 +1059,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "invitations" && s[2] && s[3] === "retry" && method === "POST") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const invitationId = Number(s[2]);
@@ -1010,7 +1117,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "invitations" && s[2] && method === "DELETE") {
-    if (!isTeamOwner(ctx.session.teamId, ctx.user.id)) {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "권한이 없습니다" }, 403);
     }
     const invitationId = Number(s[2]);
@@ -1070,12 +1177,34 @@ async function handleRequest(request, slug, method) {
 
   if (s[0] === "ideas" && s.length === 1 && method === "GET") {
     const url = new URL(request.url);
+    const scope = normalizeText(url.searchParams.get("scope")) || "workspace";
+    const workspaceIdFilter = Number(url.searchParams.get("workspaceId"));
     const statusFilter = normalizeText(url.searchParams.get("status"));
     const categoryFilter = normalizeText(url.searchParams.get("category"));
     const query = normalizeText(url.searchParams.get("query"));
+    const authorIdFilter = Number(url.searchParams.get("authorId"));
+    const participantIdFilter = Number(url.searchParams.get("participantId"));
+    const priorityFilter = normalizeText(url.searchParams.get("priority"));
+    const createdFrom = Number(url.searchParams.get("createdFrom"));
+    const createdTo = Number(url.searchParams.get("createdTo"));
+    const updatedFrom = Number(url.searchParams.get("updatedFrom"));
+    const updatedTo = Number(url.searchParams.get("updatedTo"));
 
-    const where = ["i.team_id = ?"];
-    const params = [ctx.session.teamId];
+    const where = [];
+    const params = [];
+
+    if (scope === "all") {
+      where.push("EXISTS (SELECT 1 FROM workspace_members tm WHERE tm.team_id = i.team_id AND tm.user_id = ?)");
+      params.push(ctx.user.id);
+    } else {
+      where.push("i.team_id = ?");
+      params.push(ctx.session.teamId);
+    }
+
+    if (Number.isInteger(workspaceIdFilter) && workspaceIdFilter > 0) {
+      where.push("i.team_id = ?");
+      params.push(workspaceIdFilter);
+    }
     if (statusFilter && IDEA_STATUS.includes(statusFilter as typeof IDEA_STATUS[number])) {
       where.push("i.status = ?");
       params.push(statusFilter);
@@ -1084,35 +1213,80 @@ async function handleRequest(request, slug, method) {
       where.push("i.category = ?");
       params.push(categoryFilter);
     }
+    if (Number.isInteger(authorIdFilter) && authorIdFilter > 0) {
+      where.push("i.author_id = ?");
+      params.push(authorIdFilter);
+    }
+    if (Number.isInteger(participantIdFilter) && participantIdFilter > 0) {
+      where.push(`(
+        i.author_id = ?
+        OR EXISTS (SELECT 1 FROM comments c WHERE c.idea_id = i.id AND c.user_id = ?)
+        OR EXISTS (
+          SELECT 1 FROM discussion_threads t
+          JOIN discussion_comments dc ON dc.thread_id = t.id
+          WHERE t.idea_id = i.id AND dc.user_id = ?
+        )
+      )`);
+      params.push(participantIdFilter, participantIdFilter, participantIdFilter);
+    }
+    if (Number.isFinite(createdFrom) && createdFrom > 0) {
+      where.push("i.created_at >= ?");
+      params.push(createdFrom);
+    }
+    if (Number.isFinite(createdTo) && createdTo > 0) {
+      where.push("i.created_at <= ?");
+      params.push(createdTo);
+    }
+    if (Number.isFinite(updatedFrom) && updatedFrom > 0) {
+      where.push("i.updated_at >= ?");
+      params.push(updatedFrom);
+    }
+    if (Number.isFinite(updatedTo) && updatedTo > 0) {
+      where.push("i.updated_at <= ?");
+      params.push(updatedTo);
+    }
     if (query) {
-      where.push("(i.title LIKE ? OR i.category LIKE ? OR IFNULL(i.ai_summary, '') LIKE ?)");
-      params.push(`%${query}%`, `%${query}%`, `%${query}%`);
+      where.push("(i.title LIKE ? OR i.category LIKE ? OR IFNULL(i.ai_summary, '') LIKE ? OR u.name LIKE ? OR w.name LIKE ?)");
+      params.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
     }
 
     const rows = db
       .prepare(
-        `SELECT i.*, u.name AS author_name,
+        `SELECT i.*, u.name AS author_name, w.name AS workspace_name,
                 (SELECT COUNT(*) FROM comments c WHERE c.idea_id = i.id) AS comment_count,
                 (SELECT COUNT(*) FROM reactions r WHERE r.idea_id = i.id) AS reaction_count,
-                (SELECT COUNT(*) FROM idea_versions v WHERE v.idea_id = i.id) AS version_count
-         FROM ideas i JOIN users u ON u.id = i.author_id
+                (SELECT COUNT(*) FROM idea_versions v WHERE v.idea_id = i.id) AS version_count,
+                (SELECT COUNT(*) FROM discussion_threads t WHERE t.idea_id = i.id) AS thread_count
+         FROM ideas i
+         JOIN users u ON u.id = i.author_id
+         JOIN workspaces w ON w.id = i.team_id
          WHERE ${where.join(" AND ")}
          ORDER BY i.updated_at DESC`
       )
       .all(...params);
 
+    const filtered = priorityFilter
+      ? rows.filter((row) => ideaPriorityLevel(row) === priorityFilter)
+      : rows;
+
     return json({
-      ideas: rows.map((row) => ({
+      ideas: filtered.map((row) => ({
         ...toIdeaPayload(row),
         authorName: row.author_name,
+        workspaceName: row.workspace_name,
         commentCount: row.comment_count,
         reactionCount: row.reaction_count,
-        versionCount: row.version_count
+        versionCount: row.version_count,
+        threadCount: row.thread_count,
+        priorityLevel: ideaPriorityLevel(row)
       }))
     });
   }
 
   if (s[0] === "ideas" && s.length === 1 && method === "POST") {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+      return json({ error: "아이디어 생성 권한이 없습니다" }, 403);
+    }
     const body = await readJsonBody(request);
     const title = normalizeText(body.title);
     const category = normalizeText(body.category) || "general";
@@ -1130,7 +1304,7 @@ async function handleRequest(request, slug, method) {
         "INSERT INTO ideas (team_id, author_id, title, category, status, blocks_json, ai_summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(ctx.session.teamId, ctx.user.id, title, category, status, JSON.stringify(blocks), null, now, now);
-    const ideaId = Number(result.lastInsertRowid);
+    const ideaId = queries.extractInsertId(result);
     recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.created", { title, status, category });
     return json({ idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) }, 201);
   }
@@ -1147,6 +1321,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s.length === 2 && method === "PUT") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "편집 권한이 없습니다" }, 403);
+      }
       const body = await readJsonBody(request);
       const title = normalizeText(body.title) || idea.title;
       const category = normalizeText(body.category) || idea.category;
@@ -1214,6 +1391,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "comments" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "댓글 작성 권한이 없습니다" }, 403);
+      }
       const body = await readJsonBody(request);
       const content = normalizeText(body.content);
       const parentId = body.parentId ? Number(body.parentId) : null;
@@ -1239,7 +1419,7 @@ async function handleRequest(request, slug, method) {
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "comment.created", { blockId, parentId });
       const created = db
         .prepare("SELECT c.*, u.name AS user_name FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? LIMIT 1")
-        .get(result.lastInsertRowid);
+        .get(queries.extractInsertId(result));
       emitMentionEvents({
         teamId: ctx.session.teamId,
         ideaId,
@@ -1266,10 +1446,156 @@ async function handleRequest(request, slug, method) {
       );
     }
 
+    if (s[2] === "comments" && s[3] && method === "PUT") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "댓글 수정 권한이 없습니다" }, 403);
+      }
+      const commentId = Number(s[3]);
+      const existing = db.prepare("SELECT * FROM comments WHERE id = ? AND idea_id = ?").get(commentId, ideaId);
+      if (!existing) {
+        return json({ error: "댓글을 찾을 수 없습니다" }, 404);
+      }
+      const canModerate = hasMinRole(ctx.session.teamId, ctx.user.id, "admin");
+      if (existing.user_id !== ctx.user.id && !canModerate) {
+        return json({ error: "댓글 수정 권한이 없습니다" }, 403);
+      }
+      const body = await readJsonBody(request);
+      const content = normalizeText(body.content);
+      if (!content) {
+        return json({ error: "내용은 필수입니다" }, 400);
+      }
+      db.prepare("UPDATE comments SET content = ? WHERE id = ?").run(content, commentId);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "comment.updated", { commentId, blockId: existing.block_id || null });
+      const updated = db
+        .prepare("SELECT c.*, u.name AS user_name FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? LIMIT 1")
+        .get(commentId);
+      return json({
+        comment: {
+          id: updated.id,
+          ideaId: updated.idea_id,
+          userId: updated.user_id,
+          userName: updated.user_name,
+          parentId: updated.parent_id,
+          blockId: updated.block_id,
+          content: updated.content,
+          createdAt: updated.created_at,
+          isInline: Boolean(updated.block_id)
+        }
+      });
+    }
+
+    if (s[2] === "comments" && s[3] && method === "DELETE") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "댓글 삭제 권한이 없습니다" }, 403);
+      }
+      const commentId = Number(s[3]);
+      const existing = db.prepare("SELECT * FROM comments WHERE id = ? AND idea_id = ?").get(commentId, ideaId);
+      if (!existing) {
+        return json({ error: "댓글을 찾을 수 없습니다" }, 404);
+      }
+      const canModerate = hasMinRole(ctx.session.teamId, ctx.user.id, "admin");
+      if (existing.user_id !== ctx.user.id && !canModerate) {
+        return json({ error: "댓글 삭제 권한이 없습니다" }, 403);
+      }
+      db.prepare("DELETE FROM comments WHERE id = ?").run(commentId);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "comment.deleted", { commentId, blockId: existing.block_id || null });
+      return json({ ok: true });
+    }
+
+    if (s[2] === "blocks" && s[3] && s[4] === "file" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "파일 업로드 권한이 없습니다" }, 403);
+      }
+      const blockId = normalizeText(s[3]);
+      const blocks = JSON.parse(idea.blocks_json || "[]");
+      const index = blocks.findIndex((block) => String(block?.id || "") === blockId);
+      if (index < 0) {
+        return json({ error: "블록을 찾을 수 없습니다" }, 404);
+      }
+
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!file || typeof file.arrayBuffer !== "function" || !file.name) {
+        return json({ error: "업로드할 파일이 필요합니다" }, 400);
+      }
+
+      const ext = path.extname(file.name);
+      const base = path.basename(file.name, ext).replace(/[^a-zA-Z0-9-_]/g, "_");
+      const serverName = `${Date.now()}-${base}${ext}`;
+      const uploadDir = uploadDestination();
+      const absolute = path.join(uploadDir, serverName);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      fs.writeFileSync(absolute, buffer);
+
+      const fileBlock = {
+        name: file.name,
+        size: Number(file.size || buffer.length || 0),
+        type: String(file.type || "application/octet-stream"),
+        filePath: `/uploads/${serverName}`,
+        status: "uploaded",
+        uploadedAt: Date.now(),
+        uploadedBy: ctx.user.id
+      };
+
+      blocks[index] = {
+        ...blocks[index],
+        type: "file",
+        content: JSON.stringify(fileBlock)
+      };
+
+      const now = Date.now();
+      db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(blocks), now, ideaId);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "block.file.uploaded", { blockId, fileName: file.name });
+      return json({ fileBlock, idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
+    }
+
     if (s[2] === "reactions" && method === "GET") {
       const reactionUrl = new URL(request.url);
       const targetType = normalizeText(reactionUrl.searchParams.get("targetType")) || "idea";
       const targetId = normalizeText(reactionUrl.searchParams.get("targetId")) || "";
+      if (targetType === "idea" && targetId) {
+        return json({ error: "아이디어 리액션 targetId는 비어 있어야 합니다" }, 400);
+      }
+      if (targetType === "block") {
+        const ids = ideaBlockIds(idea);
+        if (!ids.has(targetId)) {
+          return json({ error: "유효하지 않은 블록 리액션 대상입니다" }, 400);
+        }
+      }
+      if (targetType === "comment") {
+        const parts = targetId.split(":");
+        if (parts.length !== 2) {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+        const [scope, rawId] = parts;
+        const commentId = Number(rawId);
+        if (!Number.isInteger(commentId) || commentId <= 0) {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+        if (scope === "idea") {
+          const row = db.prepare("SELECT id FROM comments WHERE id = ? AND idea_id = ?").get(commentId, ideaId);
+          if (!row) {
+            return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+          }
+        } else if (scope === "thread") {
+          const row = db
+            .prepare(
+              `SELECT dc.id
+               FROM discussion_comments dc
+               JOIN discussion_threads dt ON dt.id = dc.thread_id
+               WHERE dc.id = ? AND dt.idea_id = ? AND dt.team_id = ?`
+            )
+            .get(commentId, ideaId, ctx.session.teamId);
+          if (!row) {
+            return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+          }
+        } else {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+      }
+      if (!["idea", "block", "comment"].includes(targetType)) {
+        return json({ error: "지원하지 않는 리액션 대상 유형입니다" }, 400);
+      }
       const reactions = db
         .prepare("SELECT emoji, COUNT(*) AS count FROM reactions WHERE idea_id = ? AND target_type = ? AND target_id = ? GROUP BY emoji ORDER BY count DESC, emoji ASC")
         .all(ideaId, targetType, targetId)
@@ -1282,11 +1608,57 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "reactions" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "리액션 권한이 없습니다" }, 403);
+      }
       const body = await readJsonBody(request);
       const emoji = normalizeText(body.emoji);
       const targetType = normalizeText(body.targetType) || "idea";
       const targetId = normalizeText(body.targetId) || "";
       if (!emoji) return json({ error: "이모지는 필수입니다" }, 400);
+      if (targetType === "idea" && targetId) {
+        return json({ error: "아이디어 리액션 targetId는 비어 있어야 합니다" }, 400);
+      }
+      if (targetType === "block") {
+        const ids = ideaBlockIds(idea);
+        if (!ids.has(targetId)) {
+          return json({ error: "유효하지 않은 블록 리액션 대상입니다" }, 400);
+        }
+      }
+      if (targetType === "comment") {
+        const parts = targetId.split(":");
+        if (parts.length !== 2) {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+        const [scope, rawId] = parts;
+        const commentId = Number(rawId);
+        if (!Number.isInteger(commentId) || commentId <= 0) {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+        if (scope === "idea") {
+          const row = db.prepare("SELECT id FROM comments WHERE id = ? AND idea_id = ?").get(commentId, ideaId);
+          if (!row) {
+            return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+          }
+        } else if (scope === "thread") {
+          const row = db
+            .prepare(
+              `SELECT dc.id
+               FROM discussion_comments dc
+               JOIN discussion_threads dt ON dt.id = dc.thread_id
+               WHERE dc.id = ? AND dt.idea_id = ? AND dt.team_id = ?`
+            )
+            .get(commentId, ideaId, ctx.session.teamId);
+          if (!row) {
+            return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+          }
+        } else {
+          return json({ error: "유효하지 않은 댓글 리액션 대상입니다" }, 400);
+        }
+      }
+      if (!["idea", "block", "comment"].includes(targetType)) {
+        return json({ error: "지원하지 않는 리액션 대상 유형입니다" }, 400);
+      }
       const existing = db
         .prepare("SELECT id FROM reactions WHERE idea_id = ? AND user_id = ? AND emoji = ? AND target_type = ? AND target_id = ?")
         .get(ideaId, ctx.user.id, emoji, targetType, targetId);
@@ -1323,6 +1695,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "versions" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "버전 생성 권한이 없습니다" }, 403);
+      }
       const form = await request.formData();
       const label = normalizeText(form.get("versionLabel"));
       const notes = normalizeText(form.get("notes"));
@@ -1349,10 +1724,11 @@ async function handleRequest(request, slug, method) {
           "INSERT INTO idea_versions (idea_id, version_label, notes, file_name, file_path, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
         .run(ideaId, versionLabel, notes, fileName, filePath, ctx.user.id, Date.now());
-      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.created", { versionLabel });
+      const createdVersionId = queries.extractInsertId(result);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.created", { versionLabel, versionId: createdVersionId });
       const created = db
         .prepare("SELECT v.*, u.name AS creator_name FROM idea_versions v JOIN users u ON u.id = v.created_by WHERE v.id = ?")
-        .get(result.lastInsertRowid);
+        .get(createdVersionId);
 
       return json(
         {
@@ -1373,6 +1749,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "versions" && s[3] && s[4] === "restore" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "버전 복원 권한이 없습니다" }, 403);
+      }
       const versionId = Number(s[3]);
       const versionRow = db.prepare("SELECT * FROM idea_versions WHERE id = ? AND idea_id = ?").get(versionId, ideaId) as {
         id: number; notes: string | null; version_label: string
@@ -1386,14 +1765,26 @@ async function handleRequest(request, slug, method) {
       db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ?").run(
         JSON.stringify(restoredBlocks), now, ideaId
       );
-      db.prepare(
+      const restoredLabel = `복원-${versionRow.version_label}`;
+      const restoredInsert = db.prepare(
         "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(ideaId, `복원-${versionRow.version_label}`, JSON.stringify(restoredBlocks), ctx.user.id, now);
-      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.restored", { from: versionRow.version_label });
+      ).run(ideaId, restoredLabel, JSON.stringify(restoredBlocks), ctx.user.id, now);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.restored", {
+        from: versionRow.version_label,
+        versionLabel: versionRow.version_label,
+        versionId: versionRow.id,
+        sourceVersionId: versionRow.id,
+        sourceVersionLabel: versionRow.version_label,
+        restoredVersionId: queries.extractInsertId(restoredInsert),
+        restoredVersionLabel: restoredLabel
+      });
       return json({ idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
     }
 
     if (s[2] === "summary" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "요약 생성 권한이 없습니다" }, 403);
+      }
       const payload = toIdeaPayload(idea);
       const aiSummary = generateIdeaSummary(payload);
       db.prepare("UPDATE ideas SET ai_summary = ?, updated_at = ? WHERE id = ?").run(aiSummary, Date.now(), ideaId);
@@ -1446,6 +1837,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "threads" && s.length === 3 && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "스레드 생성 권한이 없습니다" }, 403);
+      }
       const body = await readJsonBody(request);
       const title = normalizeText(body.title);
       const description = normalizeText(body.description);
@@ -1463,7 +1857,7 @@ async function handleRequest(request, slug, method) {
         )
         .run(ideaId, ctx.session.teamId, ctx.user.id, title, description, status, "", now, now);
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "thread.created", { title, status });
-      const created = getThreadForIdeaTeam(Number(result.lastInsertRowid), ideaId, ctx.session.teamId);
+      const created = getThreadForIdeaTeam(queries.extractInsertId(result), ideaId, ctx.session.teamId);
       return json(
         {
           thread: {
@@ -1484,6 +1878,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "threads" && s[3] && s.length === 4 && method === "PUT") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "스레드 수정 권한이 없습니다" }, 403);
+      }
       const threadId = Number(s[3]);
       const thread = getThreadForIdeaTeam(threadId, ideaId, ctx.session.teamId);
       if (!thread) {
@@ -1546,6 +1943,9 @@ async function handleRequest(request, slug, method) {
     }
 
     if (s[2] === "threads" && s[3] && s[4] === "comments" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "스레드 댓글 작성 권한이 없습니다" }, 403);
+      }
       const threadId = Number(s[3]);
       const thread = getThreadForIdeaTeam(threadId, ideaId, ctx.session.teamId);
       if (!thread) {
@@ -1562,7 +1962,7 @@ async function handleRequest(request, slug, method) {
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "thread.comment.created", { threadId });
       const created = db
         .prepare("SELECT dc.*, u.name AS user_name FROM discussion_comments dc JOIN users u ON u.id = dc.user_id WHERE dc.id = ?")
-        .get(result.lastInsertRowid);
+        .get(queries.extractInsertId(result));
       emitMentionEvents({
         teamId: ctx.session.teamId,
         ideaId,
@@ -1586,11 +1986,77 @@ async function handleRequest(request, slug, method) {
       );
     }
 
+    if (s[2] === "threads" && s[3] && s[4] === "comments" && s[5] && method === "PUT") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "스레드 댓글 수정 권한이 없습니다" }, 403);
+      }
+      const threadId = Number(s[3]);
+      const commentId = Number(s[5]);
+      const thread = getThreadForIdeaTeam(threadId, ideaId, ctx.session.teamId);
+      if (!thread) {
+        return json({ error: "스레드를 찾을 수 없습니다" }, 404);
+      }
+      const existing = db.prepare("SELECT * FROM discussion_comments WHERE id = ? AND thread_id = ?").get(commentId, threadId);
+      if (!existing) {
+        return json({ error: "스레드 댓글을 찾을 수 없습니다" }, 404);
+      }
+      const canModerate = hasMinRole(ctx.session.teamId, ctx.user.id, "admin");
+      if (existing.user_id !== ctx.user.id && !canModerate) {
+        return json({ error: "스레드 댓글 수정 권한이 없습니다" }, 403);
+      }
+      const body = await readJsonBody(request);
+      const content = normalizeText(body.content);
+      if (!content) {
+        return json({ error: "내용은 필수입니다" }, 400);
+      }
+      db.prepare("UPDATE discussion_comments SET content = ? WHERE id = ?").run(content, commentId);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "thread.comment.updated", { threadId, commentId });
+      const updated = db
+        .prepare("SELECT dc.*, u.name AS user_name FROM discussion_comments dc JOIN users u ON u.id = dc.user_id WHERE dc.id = ?")
+        .get(commentId);
+      return json({
+        comment: {
+          id: updated.id,
+          threadId: updated.thread_id,
+          userId: updated.user_id,
+          userName: updated.user_name,
+          content: updated.content,
+          createdAt: updated.created_at
+        }
+      });
+    }
+
+    if (s[2] === "threads" && s[3] && s[4] === "comments" && s[5] && method === "DELETE") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "스레드 댓글 삭제 권한이 없습니다" }, 403);
+      }
+      const threadId = Number(s[3]);
+      const commentId = Number(s[5]);
+      const thread = getThreadForIdeaTeam(threadId, ideaId, ctx.session.teamId);
+      if (!thread) {
+        return json({ error: "스레드를 찾을 수 없습니다" }, 404);
+      }
+      const existing = db.prepare("SELECT * FROM discussion_comments WHERE id = ? AND thread_id = ?").get(commentId, threadId);
+      if (!existing) {
+        return json({ error: "스레드 댓글을 찾을 수 없습니다" }, 404);
+      }
+      const canModerate = hasMinRole(ctx.session.teamId, ctx.user.id, "admin");
+      if (existing.user_id !== ctx.user.id && !canModerate) {
+        return json({ error: "스레드 댓글 삭제 권한이 없습니다" }, 403);
+      }
+      db.prepare("DELETE FROM discussion_comments WHERE id = ?").run(commentId);
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "thread.comment.deleted", { threadId, commentId });
+      return json({ ok: true });
+    }
+
     if (s[2] === "votes" && method === "GET") {
       return json({ votes: buildVoteSummary(ideaId, ctx.user.id) });
     }
 
     if (s[2] === "votes" && method === "POST") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "투표 권한이 없습니다" }, 403);
+      }
       const body = await readJsonBody(request);
       const voteType = normalizeText(body.voteType);
       const rawValue = body.value;
@@ -1645,55 +2111,22 @@ async function handleRequest(request, slug, method) {
     const excludeMuted = String(url.searchParams.get("excludeMuted") || "false") === "true";
     const mentionsOnly = String(url.searchParams.get("mentionsOnly") || "false") === "true";
 
-    const mentionVisibilityWhere =
-      "(e.event_type != 'mention.created' OR CAST(json_extract(e.payload_json, '$.targetUserId') AS INTEGER) = ?)";
-    const where = ["e.team_id = ?", mentionVisibilityWhere];
-    const params = [ctx.user.id, ctx.session.teamId, ctx.user.id];
-    if (unreadOnly) {
-      where.push("nr.event_id IS NULL");
-    }
-    if (Number.isFinite(since) && since > 0) {
-      where.push("e.created_at > ?");
-      params.push(since);
-    }
-    if (eventType) {
-      where.push("e.event_type = ?");
-      params.push(eventType);
-    }
-    if (mentionsOnly) {
-      where.push("(e.event_type = 'mention.created' AND CAST(json_extract(e.payload_json, '$.targetUserId') AS INTEGER) = ?)");
-      params.push(ctx.user.id);
-    }
-    if (excludeMuted) {
-      const muted = getMutedTypesForUser(ctx.user.id);
-      if (muted.length) {
-        where.push(`e.event_type NOT IN (${muted.map(() => "?").join(", ")})`);
-        params.push(...muted);
-      }
-    }
+    const mutedTypes = excludeMuted ? getMutedTypesForUser(ctx.user.id) : [];
+    const rows = queries.listNotificationsForUser({
+      userId: ctx.user.id,
+      teamId: ctx.session.teamId,
+      limit,
+      since,
+      unreadOnly,
+      eventType,
+      mentionsOnly,
+      mutedTypes
+    });
 
-    const rows = db
-      .prepare(
-        `SELECT e.*, u.name AS user_name, nr.read_at
-         FROM events e
-         LEFT JOIN users u ON u.id = e.user_id
-         LEFT JOIN notification_reads nr ON nr.event_id = e.id AND nr.user_id = ?
-         WHERE ${where.join(" AND ")}
-         ORDER BY e.created_at DESC
-         LIMIT ?`
-      )
-      .all(...params, limit);
-
-    const unreadCount = db
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM events e
-         LEFT JOIN notification_reads nr ON nr.event_id = e.id AND nr.user_id = ?
-         WHERE e.team_id = ?
-           AND (e.event_type != 'mention.created' OR CAST(json_extract(e.payload_json, '$.targetUserId') AS INTEGER) = ?)
-           AND nr.event_id IS NULL`
-      )
-      .get(ctx.user.id, ctx.session.teamId, ctx.user.id).count;
+    const unreadCount = queries.countUnreadNotificationsForUser({
+      userId: ctx.user.id,
+      teamId: ctx.session.teamId
+    });
 
     return json({ notifications: rows.map(toNotificationPayload), unreadCount });
   }
@@ -1756,27 +2189,21 @@ async function handleRequest(request, slug, method) {
 
   if (s[0] === "notifications" && s[1] && s[2] === "read" && method === "POST") {
     const eventId = Number(s[1]);
-    const eventRow = db
-      .prepare(
-        "SELECT id FROM events WHERE id = ? AND team_id = ? AND (event_type != 'mention.created' OR CAST(json_extract(payload_json, '$.targetUserId') AS INTEGER) = ?)"
-      )
-      .get(eventId, ctx.session.teamId, ctx.user.id);
+    const eventRow = queries.findReadableNotificationEventById({
+      eventId,
+      teamId: ctx.session.teamId,
+      userId: ctx.user.id
+    });
     if (!eventRow) {
       return json({ error: "알림을 찾을 수 없습니다" }, 404);
     }
-    db.prepare("INSERT OR IGNORE INTO notification_reads (user_id, event_id, read_at) VALUES (?, ?, ?)").run(
-      ctx.user.id,
-      eventId,
-      Date.now()
-    );
+    queries.insertNotificationReadIfMissing({ userId: ctx.user.id, eventId, readAt: Date.now() });
     return json({ ok: true });
   }
 
   if (s[0] === "notifications" && s[1] === "read-all" && method === "POST") {
     const now = Date.now();
-    db.prepare(
-      "INSERT OR IGNORE INTO notification_reads (user_id, event_id, read_at) SELECT ?, e.id, ? FROM events e WHERE e.team_id = ? AND (e.event_type != 'mention.created' OR CAST(json_extract(e.payload_json, '$.targetUserId') AS INTEGER) = ?)"
-    ).run(ctx.user.id, now, ctx.session.teamId, ctx.user.id);
+    queries.insertNotificationReadsForUserIfMissing({ userId: ctx.user.id, readAt: now, teamId: ctx.session.teamId });
     return json({ ok: true });
   }
 
@@ -1844,6 +2271,9 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "integrations" && s[1] === "webhooks" && s[2] && method === "PUT") {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
+      return json({ error: "웹훅 수정 권한이 없습니다" }, 403);
+    }
     const platform = normalizeText(s[2]).toLowerCase();
     if (!WEBHOOK_PLATFORMS.includes(platform)) {
       return json({ error: "지원하지 않는 플랫폼입니다" }, 400);

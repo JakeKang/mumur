@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { QueryAdapter } from "@/lib/server/query-adapter";
 
 export const SESSION_COOKIE = "mumur_session";
 export const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
@@ -25,21 +26,15 @@ export function normalizeText(value) {
     .trim();
 }
 
-export function createSession(db, userId, teamId) {
+export function createSession(queries: QueryAdapter, userId, teamId) {
   const token = crypto.randomBytes(32).toString("hex");
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  db.prepare("INSERT INTO sessions (id, user_id, team_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)").run(
-    token,
-    userId,
-    teamId,
-    expiresAt,
-    Date.now()
-  );
+  queries.insertSession(token, userId, teamId, expiresAt, Date.now());
   return { token, expiresAt };
 }
 
-export function clearExpiredSessions(db) {
-  db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
+export function clearExpiredSessions(queries: QueryAdapter) {
+  queries.deleteExpiredSessions(Date.now());
 }
 
 export function parseCookieHeader(cookieHeader) {

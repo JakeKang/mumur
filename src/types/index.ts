@@ -201,6 +201,7 @@ export type WorkspaceInvitation = {
 export type WorkspaceMe = {
   userId: number | null;
   isOwner: boolean;
+  role: WorkspaceRole | null;
 };
 
 export type UserWorkspace = {

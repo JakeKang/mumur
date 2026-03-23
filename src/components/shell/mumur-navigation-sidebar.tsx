@@ -75,6 +75,7 @@ type MumurNavigationSidebarProps = {
   onCreateWorkspace: (data: { name: string; icon: string; color: string }) => Promise<void>;
   onUpdateWorkspace: (id: number, data: { name: string; icon: string; color: string }) => Promise<void>;
   onDeleteWorkspace: (id: number) => Promise<void>;
+  switchingWorkspace?: boolean;
 };
 
 export function MumurNavigationSidebar({
@@ -89,6 +90,7 @@ export function MumurNavigationSidebar({
   onCreateWorkspace,
   onUpdateWorkspace,
   onDeleteWorkspace,
+  switchingWorkspace = false,
 }: MumurNavigationSidebarProps) {
   const [wsDialog, setWsDialog] = useState<WorkspaceDialogState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UserWorkspace | null>(null);
@@ -96,7 +98,7 @@ export function MumurNavigationSidebar({
 
   const navItems = [
     { id: "dashboard", icon: "🏠", label: "대시보드" },
-    { id: "ideas",     icon: "💡", label: "아이디어 목록" },
+    { id: "ideas",     icon: "💡", label: "전체 아이디어" },
     { id: "team",      icon: "👥", label: "팀 관리" },
   ];
 
@@ -177,6 +179,7 @@ export function MumurNavigationSidebar({
                 <button
                   type="button"
                   onClick={openCreate}
+                  disabled={switchingWorkspace}
                   aria-label="새 워크스페이스"
                   title="새 워크스페이스"
                   className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] transition text-xs"
@@ -199,13 +202,14 @@ export function MumurNavigationSidebar({
                     <button
                       type="button"
                       onClick={() => onSwitchWorkspace(ws.id)}
+                      disabled={switchingWorkspace}
                       title={ws.name}
                       aria-label={ws.name}
                       className={`flex flex-1 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${
                         isActive
                           ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]"
                           : "text-[var(--muted)] hover:bg-[var(--surface)]"
-                      } ${collapsed ? "justify-center" : "justify-start"}`}
+                      } ${collapsed ? "justify-center" : "justify-start"} ${switchingWorkspace ? "opacity-70 cursor-wait" : ""}`}
                     >
                       <span
                         className="w-5 shrink-0 text-center text-sm leading-none"
@@ -252,11 +256,16 @@ export function MumurNavigationSidebar({
                 <button
                   type="button"
                   onClick={openCreate}
+                  disabled={switchingWorkspace}
                   className="w-full rounded-md px-2 py-1.5 text-left text-xs text-[var(--muted)] hover:bg-[var(--surface)] transition"
                 >
                   + 새 워크스페이스 만들기
                 </button>
               )}
+
+              {switchingWorkspace && !collapsed ? (
+                <p className="px-2 pt-1 text-[10px] text-[var(--muted)]">워크스페이스 전환 중...</p>
+              ) : null}
             </div>
           </div>
         </div>

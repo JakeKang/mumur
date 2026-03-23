@@ -175,7 +175,7 @@ function run() {
 
   const now = Date.now();
   const passwordHash = hashPassword(PASSWORD);
-  const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(EMAIL);
+  const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(EMAIL) as { id: number } | undefined;
 
   let userId: number;
   if (existingUser) {
@@ -188,7 +188,9 @@ function run() {
     userId = Number(inserted.lastInsertRowid);
   }
 
-  let workspace = db.prepare("SELECT id FROM workspaces WHERE name = ? AND owner_id = ? LIMIT 1").get(WORKSPACE_NAME, userId);
+  let workspace = db
+    .prepare("SELECT id FROM workspaces WHERE name = ? AND owner_id = ? LIMIT 1")
+    .get(WORKSPACE_NAME, userId) as { id: number } | undefined;
   if (!workspace) {
     const created = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(WORKSPACE_NAME, userId, now, now);
     workspace = { id: Number(created.lastInsertRowid) };

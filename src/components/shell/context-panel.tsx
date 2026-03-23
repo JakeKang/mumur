@@ -3,8 +3,25 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DialogShell } from "@/components/ui/dialog-shell";
 import { Input } from "@/components/ui/input";
 import { PriorityBadge } from "@/components/ui/priority-badge";
-import { deliveryStatusLabel, notificationTypeLabel, roleLabel } from "@/lib/ui-labels";
+import { categoryLabel, deliveryStatusLabel, notificationTypeLabel, roleLabel } from "@/lib/ui-labels";
 import { useMemo, useState } from "react";
+
+function ideaPriorityLevel(idea) {
+  if (!idea) {
+    return "low";
+  }
+  if (idea.priorityLevel) {
+    return idea.priorityLevel;
+  }
+  const engagement = Number(idea.commentCount || 0) + Number(idea.reactionCount || 0) + Number(idea.versionCount || 0);
+  if (idea.status === "harvest" || engagement >= 24) {
+    return "high";
+  }
+  if (idea.status === "grow" || engagement >= 10) {
+    return "medium";
+  }
+  return "low";
+}
 
 function StatTile({ label, value }) {
   return (
@@ -32,6 +49,10 @@ function SectionTabs({ section, onChange }) {
 }
 
 export function ContextPanel({
+  activePage,
+  selectedIdea,
+  studioTab,
+  setStudioTab,
   dashboard,
   utilitySection,
   setUtilitySection,
@@ -57,16 +78,18 @@ export function ContextPanel({
   activeTeamId,
   teamMe,
   onSwitchTeam,
-  teamInvitations,
   teamInvitationMessage,
+  onLeaveWorkspace,
   onOpenTeamPage
 }) {
   const [notificationSort, setNotificationSort] = useState("recent");
   const [deliverySort, setDeliverySort] = useState("recent");
   const [webhookDialogOpen, setWebhookDialogOpen] = useState(false);
+  const canManageWebhooks = Boolean(teamMe?.isOwner || teamMe?.role === "admin" || teamMe?.role === "owner");
 
   const unreadCount = notifications.filter((item) => !item.read).length;
   const enabledWebhooks = webhooks.filter((item) => item.enabled).length;
+  const selectedIdeaPriority = ideaPriorityLevel(selectedIdea);
 
   const sortedNotifications = useMemo(() => {
     const withPriority = notifications.map((item) => {
@@ -138,6 +161,39 @@ export function ContextPanel({
           <p className="text-xs text-[var(--muted)]">보조 기능을 목적별로 분리해 빠르게 접근</p>
           <SectionTabs section={utilitySection} onChange={setUtilitySection} />
         </CardHeader>
+      </Card>
+
+      <Card className="border-[var(--border)]">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">현재 컨텍스트</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 pt-2 text-sm">
+          {activePage === "detail" && selectedIdea ? (
+            <>
+              <p className="font-medium text-[var(--foreground)]">{selectedIdea.title}</p>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
+                <span className="rounded border border-[var(--border)] bg-[var(--surface-strong)] px-1.5 py-0.5">{categoryLabel(selectedIdea.category)}</span>
+                <PriorityBadge level={selectedIdeaPriority} />
+                <span>{`댓글 ${selectedIdea.commentCount || 0}`}</span>
+                <span>{`스레드 ${selectedIdea.threadCount || 0}`}</span>
+              </div>
+              <div className="flex gap-1">
+                <Button type="button" size="sm" variant={studioTab === "editor" ? "default" : "outline"} onClick={() => setStudioTab("editor")}>편집</Button>
+                <Button type="button" size="sm" variant={studioTab === "collab" ? "default" : "outline"} onClick={() => setStudioTab("collab")}>협업</Button>
+                <Button type="button" size="sm" variant={studioTab === "docs" ? "default" : "outline"} onClick={() => setStudioTab("docs")}>문서</Button>
+              </div>
+            </>
+          ) : null}
+          {activePage === "ideas" ? (
+            <p className="text-xs text-[var(--muted)]">전체 아이디어 탐색 화면입니다. 필터를 조정하고 아이디어를 선택하면 상세 화면으로 이동합니다.</p>
+          ) : null}
+          {activePage === "dashboard" ? (
+            <p className="text-xs text-[var(--muted)]">{`총 아이디어 ${dashboard?.metrics?.totalIdeas || 0}개 · 최근 활동 ${dashboard?.metrics?.recentActivity || 0}건`}</p>
+          ) : null}
+          {activePage === "team" ? (
+            <p className="text-xs text-[var(--muted)]">{`팀 멤버 ${teamMembers.length}명 · 내 소속 팀 ${userTeams.length}개`}</p>
+          ) : null}
+        </CardContent>
       </Card>
 
       {utilitySection === "notifications" ? (
@@ -285,31 +341,50 @@ export function ContextPanel({
         <>
           <Card className="border-[var(--border)]">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">팀 개요</CardTitle>
+              <CardTitle className="text-sm">내 팀 목록</CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-2 pt-2">
-              <StatTile label="멤버" value={teamMembers.length} />
-              <StatTile label="초대" value={teamInvitations?.length || 0} />
+              <StatTile label="소속 팀" value={userTeams.length} />
+              <StatTile label="내 권한" value={teamMe?.isOwner ? "소유자" : roleLabel(teamMe?.role || "member")} />
             </CardContent>
           </Card>
 
           <Card className="border-[var(--border)]">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">팀 전환 및 권한</CardTitle>
+              <CardTitle className="text-sm">팀 전환 / 탈퇴</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-2 pt-2">
-              <select
-                className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
-                value={activeTeamId || ""}
-                onChange={(event) => onSwitchTeam(Number(event.target.value))}
-              >
-                {(userTeams || []).map((team) => (
-                  <option key={`team-switch-${team.id}`} value={team.id}>{`${team.name} (${roleLabel(team.role)})`}</option>
-                ))}
-              </select>
-              <div className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--muted)]">
-                {teamMe?.isOwner ? "현재 권한: 소유자" : "현재 권한: 멤버"}
-              </div>
+              {(userTeams || []).map((team) => {
+                const isActive = Number(activeTeamId) === Number(team.id);
+                return (
+                  <div key={`utility-team-row-${team.id}`} className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-[var(--foreground)]">{team.name}</p>
+                      <p className="text-xs text-[var(--muted)]">{roleLabel(team.role)}</p>
+                    </div>
+                    {!isActive ? (
+                      <Button type="button" size="sm" variant="outline" onClick={() => onSwitchTeam(Number(team.id))}>
+                        전환
+                      </Button>
+                    ) : (
+                      <span className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-[10px] text-[var(--muted)]">현재 팀</span>
+                    )}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={userTeams.length <= 1}
+                      onClick={() => onLeaveWorkspace(team)}
+                      className="text-rose-600 hover:bg-rose-50"
+                    >
+                      탈퇴
+                    </Button>
+                  </div>
+                );
+              })}
+              {userTeams.length <= 1 ? (
+                <p className="text-xs text-[var(--muted)]">최소 1개 워크스페이스는 유지되어야 하므로 마지막 팀에서는 탈퇴할 수 없습니다.</p>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -349,7 +424,13 @@ export function ContextPanel({
             <CardContent className="pt-2">
               <div className="space-y-2">
                 <p className="text-xs text-[var(--muted)]">연동 설정은 전용 다이얼로그에서 안전하게 수정합니다.</p>
-                <Button type="button" size="sm" onClick={() => setWebhookDialogOpen(true)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => setWebhookDialogOpen(true)}
+                  disabled={!canManageWebhooks}
+                  title={canManageWebhooks ? "웹훅 설정 열기" : "admin 권한에서만 웹훅을 수정할 수 있습니다"}
+                >
                   웹훅 설정 열기
                 </Button>
               </div>
@@ -419,12 +500,15 @@ export function ContextPanel({
             open={webhookDialogOpen}
             onClose={() => setWebhookDialogOpen(false)}
             title="웹훅 설정"
-            description="Slack/Discord 웹훅 URL과 활성 여부를 수정합니다"
             maxWidthClass="max-w-lg"
           >
             <form
               className="grid gap-2"
               onSubmit={async (event) => {
+                if (!canManageWebhooks) {
+                  event.preventDefault();
+                  return;
+                }
                 await handleSaveWebhook(event);
                 setWebhookDialogOpen(false);
               }}
@@ -433,6 +517,7 @@ export function ContextPanel({
                 className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
                 value={webhookForm.platform}
                 onChange={(event) => setWebhookForm((prev) => ({ ...prev, platform: event.target.value }))}
+                disabled={!canManageWebhooks}
               >
                 <option value="slack">slack</option>
                 <option value="discord">discord</option>
@@ -441,6 +526,7 @@ export function ContextPanel({
                 placeholder="https://..."
                 value={webhookForm.webhookUrl}
                 onChange={(event) => setWebhookForm((prev) => ({ ...prev, webhookUrl: event.target.value }))}
+                disabled={!canManageWebhooks}
                 required
               />
               <label className="text-sm text-[var(--muted)]">
@@ -449,10 +535,11 @@ export function ContextPanel({
                   className="mr-1"
                   checked={webhookForm.enabled}
                   onChange={(event) => setWebhookForm((prev) => ({ ...prev, enabled: event.target.checked }))}
+                  disabled={!canManageWebhooks}
                 />
                 활성화
               </label>
-              <Button type="submit">저장</Button>
+              <Button type="submit" disabled={!canManageWebhooks}>저장</Button>
             </form>
           </DialogShell>
         </>

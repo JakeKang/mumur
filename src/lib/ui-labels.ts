@@ -81,15 +81,21 @@ export function notificationTypeLabel(type: string) {
   const labels = {
     "mention.created": "멘션",
     "comment.created": "댓글",
+    "comment.updated": "댓글 수정",
+    "comment.deleted": "댓글 삭제",
     "thread.created": "스레드 생성",
     "thread.comment.created": "스레드 댓글",
+    "thread.comment.updated": "스레드 댓글 수정",
+    "thread.comment.deleted": "스레드 댓글 삭제",
     "vote.created": "투표",
     "vote.updated": "투표 업데이트",
     "version.created": "버전 등록",
+    "version.restored": "타임라인 복원",
     "integration.webhook.updated": "웹훅 업데이트",
     "idea.created": "아이디어 등록",
     "idea.updated": "아이디어 수정",
-    "idea.deleted": "아이디어 삭제"
+    "idea.deleted": "아이디어 삭제",
+    "team.member.left": "팀 탈퇴"
   };
   return labels[type] || type;
 }
@@ -104,16 +110,22 @@ export function timelineEventLabel(type: string) {
     "idea.updated": "아이디어 수정",
     "idea.deleted": "아이디어 삭제",
     "comment.created": "댓글 등록",
+    "comment.updated": "댓글 수정",
+    "comment.deleted": "댓글 삭제",
     "thread.created": "토론 스레드 생성",
     "thread.updated": "토론 스레드 업데이트",
     "thread.comment.created": "스레드 댓글 등록",
+    "thread.comment.updated": "스레드 댓글 수정",
+    "thread.comment.deleted": "스레드 댓글 삭제",
     "vote.created": "투표 등록",
     "vote.updated": "투표 업데이트",
     "reaction.added": "리액션 추가",
     "reaction.removed": "리액션 제거",
     "version.created": "기획서 버전 등록",
+    "version.restored": "타임라인 복원",
     "summary.generated": "AI 요약 생성",
-    "mention.created": "멘션"
+    "mention.created": "멘션",
+    "team.member.left": "팀 탈퇴"
   };
   return labels[type] || type;
 }

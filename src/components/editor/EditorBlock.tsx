@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
@@ -83,6 +84,7 @@ type EditorBlockProps = {
   isEditing: boolean;
   onFocus: () => void;
   onChange: (content: string, type?: BlockType) => void;
+  onFileUpload?: (file: File) => Promise<void>;
   onEnter: () => void;
   onDelete: () => void;
   autoFocus?: boolean;
@@ -93,6 +95,7 @@ export function EditorBlock({
   isEditing,
   onFocus,
   onChange,
+  onFileUpload,
   onEnter,
   onDelete,
   autoFocus,
@@ -158,12 +161,34 @@ export function EditorBlock({
     })();
     if (fileData?.name) {
       return (
-        <div className="flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-          <span className="text-2xl">📎</span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-[var(--foreground)]">{fileData.name}</p>
-            {fileData.size && <p className="text-xs text-[var(--muted)]">{(fileData.size / 1024).toFixed(1)} KB</p>}
+        <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">📎</span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-[var(--foreground)]">{fileData.name}</p>
+              <p className="text-xs text-[var(--muted)]">
+                {fileData.size ? `${(fileData.size / 1024).toFixed(1)} KB` : "크기 정보 없음"}
+                {fileData.status ? ` · ${fileData.status}` : ""}
+              </p>
+            </div>
           </div>
+          {fileData.type?.startsWith("image/") && fileData.filePath ? (
+            <Image
+              src={fileData.filePath}
+              alt={fileData.name || "image"}
+              width={1280}
+              height={720}
+              unoptimized
+              className="max-h-72 w-auto rounded-md border border-[var(--border)] object-contain"
+            />
+          ) : null}
+          {fileData.filePath ? (
+            <a href={fileData.filePath} target="_blank" rel="noreferrer" className="inline-block text-xs text-[var(--foreground)] underline">
+              파일 열기
+            </a>
+          ) : null}
+          {fileData.status === "uploading" ? <p className="text-xs text-[var(--muted)]">업로드 중...</p> : null}
+          {fileData.status === "failed" ? <p className="text-xs text-rose-600">업로드 실패</p> : null}
         </div>
       );
     }
@@ -181,7 +206,11 @@ export function EditorBlock({
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (!file) return;
-            onChange(JSON.stringify({ name: file.name, size: file.size, type: file.type }));
+            if (onFileUpload) {
+              void onFileUpload(file);
+              return;
+            }
+            onChange(JSON.stringify({ name: file.name, size: file.size, type: file.type, status: "uploaded" }));
           }}
         />
       </label>

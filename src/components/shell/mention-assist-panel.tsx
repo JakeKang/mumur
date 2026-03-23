@@ -23,7 +23,7 @@ export function MentionAssistPanel({
     <>
       {matches.length ? (
         <div className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-          <p className="mb-1 text-xs text-[var(--muted)]" id={helpId}>{helpText}</p>
+          {helpText ? <p className="mb-1 text-xs text-[var(--muted)]" id={helpId}>{helpText}</p> : null}
           <div id={statusId} aria-live="polite" aria-atomic="true" className="sr-only">
             {announcement}
           </div>
