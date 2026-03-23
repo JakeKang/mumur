@@ -61,24 +61,6 @@ export type CommentQueries = {
   deleteComment: (commentId: number) => void;
 };
 
-export type ThreadQueries = {
-  createThread: (input: {
-    ideaId: number;
-    teamId: number;
-    createdBy: number;
-    title: string;
-    description: string;
-    status: string;
-    createdAt: number;
-    updatedAt: number;
-  }) => { threadId: number };
-  updateThread: (input: { threadId: number; title: string; description: string; status: string; conclusion: string; updatedAt: number }) => void;
-};
-
-export type VoteQueries = {
-  upsertVote: (input: { ideaId: number; userId: number; voteType: string; voteValue: number; now: number }) => void;
-};
-
 export type VersionQueries = {
   createVersion: (input: {
     ideaId: number;
@@ -108,8 +90,6 @@ export type FullQueryAdapterContract = SessionQueries &
   WorkspaceQueries &
   IdeaQueries &
   CommentQueries &
-  ThreadQueries &
-  VoteQueries &
   VersionQueries &
   EventQueries;
 

@@ -51,13 +51,14 @@ export type Idea = {
   category: string;
   status: IdeaStatus;
   blocks: Block[];
-  aiSummary: string | null;
   createdAt: number;
   updatedAt: number;
   commentCount?: number;
   reactionCount?: number;
   versionCount?: number;
-  threadCount?: number;
+  authorName?: string;
+  workspaceName?: string;
+  priorityLevel?: "low" | "medium" | "high";
 };
 
 
@@ -74,68 +75,7 @@ export type Comment = {
 };
 
 
-export type ThreadStatus = "active" | "resolved" | "on_hold";
-
-export type Thread = {
-  id: number;
-  ideaId: number;
-  workspaceId: number;
-  teamId: number;
-  createdBy: number;
-  title: string;
-  description: string | null;
-  status: ThreadStatus;
-  conclusion: string | null;
-  createdAt: number;
-  updatedAt: number;
-  commentCount?: number;
-  creatorName?: string;
-};
-
-export type ThreadComment = {
-  id: number;
-  threadId: number;
-  userId: number;
-  content: string;
-  createdAt: number;
-  userName?: string;
-};
-
-export type ThreadForm = {
-  title: string;
-  description: string;
-  status: ThreadStatus;
-};
-
-export type ThreadEdit = {
-  title: string;
-  description: string;
-  status: ThreadStatus;
-  conclusion: string;
-};
-
-
-export type VoteType = "binary" | "score";
-
-export type BinaryVotes = {
-  approve: number;
-  reject: number;
-  total: number;
-};
-
 export type ScoreDistribution = { score: number; count: number };
-
-export type ScoreVotes = {
-  average: number;
-  total: number;
-  distribution: ScoreDistribution[];
-};
-
-export type Votes = {
-  binary: BinaryVotes;
-  score: ScoreVotes;
-  mine: { binary: number | null; score: number | null };
-};
 
 export type Reaction = {
   id: number;
@@ -288,13 +228,33 @@ export type WebhookForm = {
 
 export type DashboardMetrics = {
   totalIdeas: number;
-  byStatus: Record<string, number>;
-  activeMembers: number;
+  totalComments: number;
+  activeIdeas: number;
+  totalWorkspaces: number;
   recentActivity: number;
+};
+
+export type DashboardWorkspace = {
+  id: number;
+  name: string;
+  icon: string;
+  color: string;
+  ideaCount: number;
+  recentActivity: number;
+  lastUpdatedAt: number;
+  statusCounts: Record<string, number>;
+};
+
+export type DashboardActivity = {
+  type: string;
+  count: number;
 };
 
 export type Dashboard = {
   metrics: DashboardMetrics;
+  statusCounts: Record<string, number>;
+  recentActivity: DashboardActivity[];
+  workspaces: DashboardWorkspace[];
   recentIdeas: Idea[];
 } | null;
 

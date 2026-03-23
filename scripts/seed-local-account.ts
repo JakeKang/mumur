@@ -50,7 +50,7 @@ function ensureSchema(db: InstanceType<typeof Database>) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       team_id INTEGER NOT NULL, author_id INTEGER NOT NULL,
       title TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL,
-      blocks_json TEXT NOT NULL, ai_summary TEXT,
+      blocks_json TEXT NOT NULL,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
       FOREIGN KEY(team_id) REFERENCES workspaces(id) ON DELETE CASCADE,
       FOREIGN KEY(author_id) REFERENCES users(id) ON DELETE CASCADE
@@ -79,32 +79,6 @@ function ensureSchema(db: InstanceType<typeof Database>) {
       created_by INTEGER NOT NULL, created_at INTEGER NOT NULL,
       FOREIGN KEY(idea_id) REFERENCES ideas(id) ON DELETE CASCADE,
       FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS discussion_threads (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      idea_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
-      created_by INTEGER NOT NULL, title TEXT NOT NULL,
-      description TEXT, status TEXT NOT NULL, conclusion TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-      FOREIGN KEY(idea_id) REFERENCES ideas(id) ON DELETE CASCADE,
-      FOREIGN KEY(team_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-      FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS discussion_comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      thread_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-      content TEXT NOT NULL, created_at INTEGER NOT NULL,
-      FOREIGN KEY(thread_id) REFERENCES discussion_threads(id) ON DELETE CASCADE,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS votes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      idea_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-      vote_type TEXT NOT NULL, vote_value INTEGER NOT NULL,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-      UNIQUE(idea_id, user_id, vote_type),
-      FOREIGN KEY(idea_id) REFERENCES ideas(id) ON DELETE CASCADE,
-      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

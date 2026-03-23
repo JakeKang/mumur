@@ -47,16 +47,6 @@ export type PostgresQueryAdapter = {
     createdBy: number;
     createdAt: number;
   }) => Promise<{ versionId: number }>;
-  createThread: (input: {
-    ideaId: number;
-    teamId: number;
-    createdBy: number;
-    title: string;
-    description: string;
-    status: string;
-    createdAt: number;
-    updatedAt: number;
-  }) => Promise<{ threadId: number }>;
 };
 
 function mentionVisibilityClause() {
@@ -161,7 +151,7 @@ export function createPostgresQueryAdapter(pool: Pool): PostgresQueryAdapter {
     },
     createIdea: async ({ teamId, authorId, title, category, status, blocksJson, now }) => {
       const result = await pool.query(
-        "INSERT INTO ideas (team_id, author_id, title, category, status, blocks_json, ai_summary, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $7) RETURNING id",
+        "INSERT INTO ideas (team_id, author_id, title, category, status, blocks_json, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id",
         [teamId, authorId, title, category, status, blocksJson, now]
       );
       return { ideaId: Number(result.rows[0]?.id || 0) };
@@ -172,13 +162,6 @@ export function createPostgresQueryAdapter(pool: Pool): PostgresQueryAdapter {
         [ideaId, versionLabel, notes, fileName, filePath, createdBy, createdAt]
       );
       return { versionId: Number(result.rows[0]?.id || 0) };
-    },
-    createThread: async ({ ideaId, teamId, createdBy, title, description, status, createdAt, updatedAt }) => {
-      const result = await pool.query(
-        "INSERT INTO discussion_threads (idea_id, team_id, created_by, title, description, status, conclusion, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8) RETURNING id",
-        [ideaId, teamId, createdBy, title, description, status, createdAt, updatedAt]
-      );
-      return { threadId: Number(result.rows[0]?.id || 0) };
     }
   };
 }
