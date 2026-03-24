@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { ensureDir } from "@/lib/server/db";
-import { getDatabaseClient, getQueryAdapter } from "@/lib/server/database-client";
+import { ensureDir } from "@/shared/lib/server/db";
+import { getDatabaseClient, getQueryAdapter } from "@/shared/lib/server/database-client";
 import {
   SESSION_COOKIE,
   clearExpiredSessions,
@@ -11,9 +11,9 @@ import {
   normalizeText,
   parseCookieHeader,
   verifyPassword
-} from "@/lib/server/auth";
-import { IDEA_STATUS } from "@/lib/idea-status";
-import { notificationTypeLabel } from "@/lib/ui-labels";
+} from "@/shared/lib/server/auth";
+import { IDEA_STATUS } from "@/features/ideas/constants/idea-status";
+import { notificationTypeLabel } from "@/shared/constants/ui-labels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

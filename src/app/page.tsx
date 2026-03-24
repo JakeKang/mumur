@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ContextPanel } from "@/components/shell/context-panel";
-import { IdeaCreateDialog } from "@/components/shell/idea-create-dialog";
-import { IdeaStudioPanel } from "@/components/shell/idea-studio-panel";
-import { MumurNavigationSidebar } from "@/components/shell/mumur-navigation-sidebar";
-import { DashboardSurface, IdeasSurface, TeamSurface } from "@/components/shell/workspace-pages";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { GROWTH_PRESET_STATUSES, IDEA_STATUS, STATUS_META } from "@/lib/idea-status";
-import { dequeueIdeaSync, enqueueIdeaSync, listIdeaSyncQueue, loadIdeaDraft, removeIdeaDraft, saveIdeaDraft } from "@/lib/local-first";
-import type { WorkspaceMe, WorkspaceRole } from "@/types";
+import { ContextPanel } from "@/features/notifications/components/context-panel";
+import { IdeaCreateDialog } from "@/features/ideas/components/idea-create-dialog";
+import { IdeaStudioPanel } from "@/features/ideas/components/idea-studio-panel";
+import { MumurNavigationSidebar } from "@/features/workspace/components/mumur-navigation-sidebar";
+import { DashboardSurface, IdeasSurface, TeamSurface } from "@/features/workspace/components/workspace-pages";
+import { ConfirmDialog } from "@/shared/components/ui/confirm-dialog";
+import { GROWTH_PRESET_STATUSES, IDEA_STATUS, STATUS_META } from "@/features/ideas/constants/idea-status";
+import { dequeueIdeaSync, enqueueIdeaSync, listIdeaSyncQueue, loadIdeaDraft, removeIdeaDraft, saveIdeaDraft } from "@/features/ideas/utils/local-first";
+import { ApiError, apiRequest } from "@/shared/lib/api-client";
+import type { WebhookForm, WorkspaceMe, WorkspaceMemberForm, WorkspaceRole } from "@/shared/types";
 import { AlertCircle, Bell, Check, Loader2, LogOut, Plus, RefreshCw } from "lucide-react";
 
 const NOTIFICATION_TYPES = [
@@ -21,32 +22,6 @@ const NOTIFICATION_TYPES = [
 ];
 
 type LocalSyncState = "synced" | "pending" | "syncing" | "failed";
-
-class ApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function api(path: string, options: RequestInit = {}) {
-  const response = await fetch(path, {
-    credentials: "include",
-    headers: {
-      ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
-      ...(options.headers || {})
-    },
-    ...options
-  });
-
-  const json = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new ApiError(json.error || "요청 처리에 실패했습니다", response.status);
-  }
-  return json;
-}
 
 function blockSeed(type = "paragraph") {
   return {
@@ -87,6 +62,8 @@ function syncStateLabel(state: LocalSyncState) {
   return "저장됨";
 }
 
+const api = apiRequest;
+
 export default function HomePage() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
@@ -118,11 +95,11 @@ export default function HomePage() {
     updatedFrom: "",
     updatedTo: ""
   });
-  const [ideaView, setIdeaView] = useState("card");
+  const [ideaView, setIdeaView] = useState<"card" | "list">("card");
   const [navigatorSort, setNavigatorSort] = useState("recent");
-  const [navigatorPreset, setNavigatorPreset] = useState("all");
+  const [navigatorPreset, setNavigatorPreset] = useState<"all" | "updatedToday" | "discussion" | "growth">("all");
   const [studioTab, setStudioTab] = useState("editor");
-  const [newIdeaForm, setNewIdeaForm] = useState<{ title: string; category: string; status: import("@/types").IdeaStatus }>({ title: "", category: "", status: "seed" });
+  const [newIdeaForm, setNewIdeaForm] = useState<{ title: string; category: string; status: import("@/shared/types").IdeaStatus }>({ title: "", category: "", status: "seed" });
   const [ideas, setIdeas] = useState([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState(null);
   const [selectedIdea, setSelectedIdea] = useState(null);
@@ -155,11 +132,11 @@ export default function HomePage() {
   const [webhooks, setWebhooks] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
   const [userTeams, setUserTeams] = useState([]);
-  const [teamMemberForm, setTeamMemberForm] = useState({ email: "", role: "editor" });
+  const [teamMemberForm, setTeamMemberForm] = useState<WorkspaceMemberForm>({ email: "", role: "editor" });
   const [teamMe, setTeamMe] = useState<WorkspaceMe>({ userId: null, isOwner: false, role: null });
   const [teamInvitations, setTeamInvitations] = useState([]);
   const [teamInvitationMessage, setTeamInvitationMessage] = useState("");
-  const [webhookForm, setWebhookForm] = useState({ platform: "slack", webhookUrl: "", enabled: false });
+  const [webhookForm, setWebhookForm] = useState<WebhookForm>({ platform: "slack", webhookUrl: "", enabled: false });
   const [confirmDialog, setConfirmDialog] = useState({
     open: false,
     title: "",
@@ -627,7 +604,13 @@ export default function HomePage() {
           loadIdeas(filters)
         ]);
       }
-      let data: any;
+      let data: {
+        idea: {
+          updatedAt?: number;
+          blocks?: Array<{ id: string; type: string; content: string; checked: boolean }>;
+          [key: string]: unknown;
+        };
+      };
       try {
         data = await api(`/api/ideas/${ideaId}`);
       } catch (err) {
@@ -970,7 +953,7 @@ export default function HomePage() {
 
   const handleSaveIdea = async (
     event: { preventDefault?: () => void } | null = null,
-    patch: Partial<{ title: string; category: string; status: import("@/types").IdeaStatus; blocks: Array<{ id: string; type: string; content: string; checked: boolean }> }> = {}
+    patch: Partial<{ title: string; category: string; status: import("@/shared/types").IdeaStatus; blocks: Array<{ id: string; type: string; content: string; checked: boolean }> }> = {}
   ) => {
     event?.preventDefault?.();
     if (!selectedIdea) {
