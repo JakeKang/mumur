@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
 const db = getDatabaseClient();
 const queries = getQueryAdapter();
 
-const BLOCK_TYPES = ["paragraph", "heading1", "heading2", "heading3", "bulletList", "numberedList", "checklist", "quote", "code", "divider", "file"];
+const BLOCK_TYPES = ["paragraph", "heading1", "heading2", "heading3", "bulletList", "numberedList", "checklist", "quote", "code", "divider", "file", "callout", "image"];
 const WEBHOOK_PLATFORMS = ["slack", "discord"];
 const TEAM_ROLES = ["viewer", "editor", "deleter", "admin", "owner", "member"];
 const encoder = new TextEncoder();
@@ -49,6 +49,7 @@ function toIdeaPayload(row) {
     title: row.title,
     category: row.category,
     status: row.status,
+    priority: row.priority || "low",
     blocks: JSON.parse(row.blocks_json || "[]"),
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -73,7 +74,10 @@ function parseBlocks(inputBlocks) {
       return "heading2";
     }
     if (raw === "image") {
-      return "file";
+      return "image";
+    }
+    if (raw === "callout") {
+      return "callout";
     }
     if (raw === "table" || raw === "embed") {
       return "paragraph";
@@ -618,6 +622,109 @@ async function handleRequest(request, slug, method) {
       )
       .get(ctx.user.id, ctx.session.teamId);
     return json({ user: ctx.user, workspace });
+  }
+
+  if (s[0] === "auth" && s[1] === "me" && method === "PATCH") {
+    const body = await readJsonBody(request);
+    const user = db
+      .prepare("SELECT id, name, email, password_hash FROM users WHERE id = ?")
+      .get(ctx.session.userId) as { id: number; name: string; email: string; password_hash: string } | undefined;
+    if (!user) {
+      return json({ error: "사용자를 찾을 수 없습니다" }, 404);
+    }
+
+    const cleanName = normalizeText(body.name || "");
+    const cleanEmail = normalizeText(body.email || "").toLowerCase();
+    const cleanNewPwd = String(body.newPassword || "");
+    const changingEmail = cleanEmail && cleanEmail !== String(user.email || "").toLowerCase();
+    const changingPassword = cleanNewPwd.length > 0;
+
+    if (changingEmail || changingPassword) {
+      if (!body.currentPassword || !verifyPassword(String(body.currentPassword), user.password_hash)) {
+        return json({ error: "현재 비밀번호가 올바르지 않습니다" }, 403);
+      }
+    }
+
+    if (changingPassword && cleanNewPwd.length < 8) {
+      return json({ error: "새 비밀번호는 8자 이상이어야 합니다" }, 400);
+    }
+
+    if (changingEmail) {
+      const existing = db.prepare("SELECT id FROM users WHERE email = ? AND id != ?").get(cleanEmail, ctx.session.userId);
+      if (existing) {
+        return json({ error: "이미 사용 중인 이메일입니다" }, 409);
+      }
+    }
+
+    const setParts: string[] = [];
+    const params: unknown[] = [];
+
+    if (cleanName) {
+      setParts.push("name = ?");
+      params.push(cleanName);
+    }
+    if (changingEmail) {
+      setParts.push("email = ?");
+      params.push(cleanEmail);
+    }
+    if (changingPassword) {
+      setParts.push("password_hash = ?");
+      params.push(hashPassword(cleanNewPwd));
+    }
+
+    if (setParts.length === 0) {
+      return json({ error: "변경할 항목이 없습니다" }, 400);
+    }
+
+    params.push(ctx.session.userId);
+    db.prepare(`UPDATE users SET ${setParts.join(", ")} WHERE id = ?`).run(...params);
+
+    const updated = db
+      .prepare("SELECT id, name, email, created_at FROM users WHERE id = ?")
+      .get(ctx.session.userId) as { id: number; name: string; email: string; created_at: number };
+    return json({ user: updated });
+  }
+
+  if (s[0] === "drafts" && s.length === 2 && method === "GET") {
+    const ideaId = Number(s[1]);
+    if (!Number.isInteger(ideaId) || ideaId <= 0) {
+      return json({ error: "유효하지 않은 아이디어 ID입니다" }, 400);
+    }
+    const draft = db
+      .prepare("SELECT payload_json, updated_at FROM idea_drafts WHERE idea_id = ? AND user_id = ?")
+      .get(ideaId, ctx.session.userId) as { payload_json: string; updated_at: number } | undefined;
+    if (!draft) {
+      return json({ draft: null });
+    }
+    return json({ draft: { ideaId, payload: JSON.parse(draft.payload_json), updatedAt: draft.updated_at } });
+  }
+
+  if (s[0] === "drafts" && s.length === 2 && method === "PUT") {
+    const ideaId = Number(s[1]);
+    if (!Number.isInteger(ideaId) || ideaId <= 0) {
+      return json({ error: "유효하지 않은 아이디어 ID입니다" }, 400);
+    }
+    const body = await readJsonBody(request);
+    const payloadStr = JSON.stringify(body.payload || {});
+    if (payloadStr.length > 512 * 1024) {
+      return json({ error: "드래프트가 너무 큽니다 (최대 512KB)" }, 413);
+    }
+    db.prepare("INSERT OR REPLACE INTO idea_drafts (idea_id, user_id, payload_json, updated_at) VALUES (?, ?, ?, ?)").run(
+      ideaId,
+      ctx.session.userId,
+      payloadStr,
+      Date.now()
+    );
+    return json({ ok: true });
+  }
+
+  if (s[0] === "drafts" && s.length === 2 && method === "DELETE") {
+    const ideaId = Number(s[1]);
+    if (!Number.isInteger(ideaId) || ideaId <= 0) {
+      return json({ error: "유효하지 않은 아이디어 ID입니다" }, 400);
+    }
+    db.prepare("DELETE FROM idea_drafts WHERE idea_id = ? AND user_id = ?").run(ideaId, ctx.session.userId);
+    return json({ ok: true });
   }
 
   if (s[0] === "workspaces" && s.length === 1 && method === "GET") {
@@ -1319,21 +1426,25 @@ async function handleRequest(request, slug, method) {
       const title = normalizeText(body.title) || idea.title;
       const category = normalizeText(body.category) || idea.category;
       const status = normalizeText(body.status) || idea.status;
+      const priority = body.priority && ["low", "medium", "high"].includes(String(body.priority))
+        ? String(body.priority)
+        : String(idea.priority || "low");
       const blocks = parseBlocks(body.blocks);
     const ideaStatuses: readonly string[] = IDEA_STATUS;
     if (!ideaStatuses.includes(status)) {
       return json({ error: "유효하지 않은 상태입니다" }, 400);
       }
       const now = Date.now();
-      db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, blocks_json = ?, updated_at = ? WHERE id = ?").run(
+      db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, priority = ?, blocks_json = ?, updated_at = ? WHERE id = ?").run(
         title,
         category,
         status,
+        priority,
         JSON.stringify(blocks),
         now,
         ideaId
       );
-      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", { title, status, category });
+      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", { title, status, category, priority });
 
       const lastSnapshot = db.prepare(
         "SELECT created_at FROM idea_versions WHERE idea_id = ? AND version_label LIKE 'auto-%' ORDER BY created_at DESC LIMIT 1"
@@ -2113,4 +2224,10 @@ export async function DELETE(request, context) {
   const params = await context.params;
   const slug = params?.slug || [];
   return handleRequest(request, slug, "DELETE");
+}
+
+export async function PATCH(request, context) {
+  const params = await context.params;
+  const slug = params?.slug || [];
+  return handleRequest(request, slug, "PATCH");
 }

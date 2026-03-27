@@ -185,6 +185,18 @@ export function applySqliteSchema(db: InstanceType<typeof Database>) {
       FOREIGN KEY(invited_by) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY(resolved_by) REFERENCES users(id) ON DELETE SET NULL
     );
+
+    CREATE TABLE IF NOT EXISTS idea_drafts (
+      idea_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      payload_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (idea_id, user_id),
+      FOREIGN KEY(idea_id) REFERENCES ideas(id) ON DELETE CASCADE,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_idea_drafts_user ON idea_drafts(user_id);
   `);
 
   const workspaceViewColumns = db.prepare("PRAGMA table_info(workspace_views)").all();
@@ -193,4 +205,9 @@ export function applySqliteSchema(db: InstanceType<typeof Database>) {
     db.prepare("ALTER TABLE workspace_views ADD COLUMN updated_by INTEGER").run();
   }
   db.prepare("UPDATE workspace_views SET updated_by = created_by WHERE updated_by IS NULL").run();
+
+  const ideaColumns = db.prepare("PRAGMA table_info(ideas)").all() as { name: string }[];
+  if (!ideaColumns.some((c) => c.name === "priority")) {
+    db.prepare("ALTER TABLE ideas ADD COLUMN priority TEXT NOT NULL DEFAULT 'low'").run();
+  }
 }

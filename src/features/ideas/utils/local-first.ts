@@ -1,3 +1,11 @@
+/**
+ * @deprecated This module used browser IndexedDB for local draft storage.
+ * It has been superseded by server-draft.ts which persists drafts server-side
+ * via authenticated SQLite-backed API endpoints.
+ *
+ * This file is kept for reference. Import from server-draft.ts instead.
+ */
+
 export type IdeaSavePayload = {
   title: string;
   category: string;
