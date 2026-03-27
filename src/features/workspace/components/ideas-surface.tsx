@@ -5,6 +5,7 @@ import { Input } from "@/shared/components/ui/input";
 import { PriorityBadge } from "@/shared/components/ui/priority-badge";
 import { categoryLabel } from "@/shared/constants/ui-labels";
 import { ideaPriorityMeta } from "@/features/workspace/components/idea-priority-meta";
+import { useWorkbenchActionsContext, useWorkbenchSessionContext } from "@/modules/workbench/presentation/contexts/workbench-contexts";
 import type { Dispatch, SetStateAction } from "react";
 import type { Idea, IdeaStatus } from "@/shared/types";
 
@@ -41,13 +42,8 @@ type IdeasSurfaceProps = {
   presetCounts: { all: number; updatedToday: number; discussion: number; growth: number };
   STATUS_META: StatusMetaMap;
   onQuickStatusFilter: (status: "" | IdeaStatus) => void;
-  onSelectIdea: (ideaId: number, workspaceId: number) => void;
-  onOpenCreateIdea: () => void;
-  canCreateIdea?: boolean;
   categoryOptions: string[];
-  workspaceOptions: WorkspaceOption[];
   authorOptions: AuthorOption[];
-  formatTime: (value: unknown) => string;
   loading?: boolean;
 };
 
@@ -77,15 +73,12 @@ export function IdeasSurface({
   presetCounts,
   STATUS_META,
   onQuickStatusFilter,
-  onSelectIdea,
-  onOpenCreateIdea,
-  canCreateIdea = true,
   categoryOptions,
-  workspaceOptions,
   authorOptions,
-  formatTime,
   loading = false
 }: IdeasSurfaceProps) {
+  const { userTeams, canCreateIdea, formatTime } = useWorkbenchSessionContext();
+  const { openCreateIdea, selectIdea } = useWorkbenchActionsContext();
   const statusFilters: Array<{ key: "" | IdeaStatus; label: string }> = [
     { key: "", label: "전체" },
     { key: "seed", label: STATUS_META.seed.icon },
@@ -162,7 +155,7 @@ export function IdeasSurface({
               </button>
             </div>
 
-            <Button onClick={onOpenCreateIdea} disabled={!canCreateIdea}>+ 새 아이디어</Button>
+            <Button onClick={openCreateIdea} disabled={!canCreateIdea}>+ 새 아이디어</Button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -172,7 +165,7 @@ export function IdeasSurface({
               className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs"
             >
               <option value="">전체 워크스페이스</option>
-               {(workspaceOptions || []).map((workspace) => (
+               {(userTeams || []).map((workspace) => (
                 <option key={`ideas-workspace-filter-${workspace.id}`} value={String(workspace.id)}>
                   {workspace.name}
                 </option>
@@ -224,76 +217,7 @@ export function IdeasSurface({
             </div>
           </div>
 
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
-            <select
-              value={filters.priority}
-              onChange={(event) => setFilters((prev) => ({ ...prev, priority: event.target.value }))}
-              className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs"
-            >
-              <option value="">전체 중요도</option>
-              <option value="high">높음</option>
-              <option value="medium">중간</option>
-              <option value="low">낮음</option>
-            </select>
 
-            <select
-              value={filters.authorId}
-              onChange={(event) => setFilters((prev) => ({ ...prev, authorId: event.target.value }))}
-              className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs"
-            >
-              <option value="">전체 작성자</option>
-              {(authorOptions || []).map((author) => (
-                <option key={`ideas-author-filter-${author.id}`} value={String(author.id)}>
-                  {author.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={filters.participantId}
-              onChange={(event) => setFilters((prev) => ({ ...prev, participantId: event.target.value }))}
-              className="h-8 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs"
-            >
-              <option value="">전체 참여자</option>
-              {(authorOptions || []).map((author) => (
-                <option key={`ideas-participant-filter-${author.id}`} value={String(author.id)}>
-                  {author.name}
-                </option>
-              ))}
-            </select>
-
-            <div className="flex items-center gap-2">
-              <Input
-                type="date"
-                value={filters.createdFrom}
-                onChange={(event) => setFilters((prev) => ({ ...prev, createdFrom: event.target.value }))}
-                className="h-8 text-xs"
-              />
-              <span className="text-xs text-[var(--muted)]">~</span>
-              <Input
-                type="date"
-                value={filters.createdTo}
-                onChange={(event) => setFilters((prev) => ({ ...prev, createdTo: event.target.value }))}
-                className="h-8 text-xs"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Input
-                type="date"
-                value={filters.updatedFrom}
-                onChange={(event) => setFilters((prev) => ({ ...prev, updatedFrom: event.target.value }))}
-                className="h-8 text-xs"
-              />
-              <span className="text-xs text-[var(--muted)]">~</span>
-              <Input
-                type="date"
-                value={filters.updatedTo}
-                onChange={(event) => setFilters((prev) => ({ ...prev, updatedTo: event.target.value }))}
-                className="h-8 text-xs"
-              />
-            </div>
-          </div>
         </CardContent>
       </Card>
 
@@ -311,7 +235,7 @@ export function IdeasSurface({
             {filters.query || filters.status ? "검색 조건을 변경해보세요" : "첫 번째 아이디어를 만들어보세요"}
           </p>
           {!filters.query && !filters.status && (
-            <Button onClick={onOpenCreateIdea} disabled={!canCreateIdea}>+ 새 아이디어</Button>
+            <Button onClick={openCreateIdea} disabled={!canCreateIdea}>+ 새 아이디어</Button>
           )}
         </div>
       ) : ideaView === "card" ? (
@@ -322,8 +246,8 @@ export function IdeasSurface({
               <button
                 key={`ideas-card-${idea.id}`}
                 type="button"
-                onClick={() => onSelectIdea(idea.id, idea.teamId)}
-                className="cursor-pointer rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-left transition hover:border-[var(--accent)]/40 hover:shadow-[0_4px_16px_rgba(0,0,0,0.08)]"
+                onClick={() => void selectIdea(idea.id, { workspaceId: idea.teamId, openPage: true })}
+                className="cursor-pointer rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-left transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--accent)]/40 hover:shadow-[0_6px_20px_rgba(0,0,0,0.10)]"
               >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
@@ -348,8 +272,8 @@ export function IdeasSurface({
                 <button
                   key={`ideas-mobile-${idea.id}`}
                   type="button"
-                  onClick={() => onSelectIdea(idea.id, idea.teamId)}
-                  className="cursor-pointer rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition hover:border-[var(--accent)]/40 hover:shadow-[0_4px_16px_rgba(0,0,0,0.08)]"
+                  onClick={() => void selectIdea(idea.id, { workspaceId: idea.teamId, openPage: true })}
+                  className="cursor-pointer rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--accent)]/40 hover:shadow-[0_6px_20px_rgba(0,0,0,0.10)]"
                 >
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="truncate text-sm font-semibold text-[var(--foreground)]">{idea.title}</p>
@@ -383,8 +307,8 @@ export function IdeasSurface({
                 <button
                   key={`ideas-row-${idea.id}`}
                   type="button"
-                  onClick={() => onSelectIdea(idea.id, idea.teamId)}
-                  className={`grid w-full cursor-pointer grid-cols-[1fr_90px_120px_120px_85px_70px_70px] items-center px-4 py-3 text-left text-sm text-[var(--foreground)] transition hover:bg-[var(--surface-strong)] ${
+                  onClick={() => void selectIdea(idea.id, { workspaceId: idea.teamId, openPage: true })}
+                  className={`grid w-full cursor-pointer grid-cols-[1fr_90px_120px_120px_85px_70px_70px] items-center px-4 py-3 text-left text-sm text-[var(--foreground)] transition-all duration-150 hover:translate-x-0.5 hover:bg-[var(--surface-strong)] ${
                     index < ideas.length - 1 ? "border-t border-[var(--border)]" : ""
                   }`}
                 >

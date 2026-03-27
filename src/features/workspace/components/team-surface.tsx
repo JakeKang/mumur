@@ -4,13 +4,13 @@ import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/components/ui/card";
 import { Input } from "@/shared/components/ui/input";
 import { invitationStatusLabel, roleLabel } from "@/shared/constants/ui-labels";
+import { useWorkbenchSessionContext } from "@/modules/workbench/presentation/contexts/workbench-contexts";
 import type React from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type { Webhook, WebhookForm, WorkspaceInvitation, WorkspaceMe, WorkspaceMember, WorkspaceMemberForm, WorkspaceRole } from "@/shared/types";
+import type { Webhook, WebhookForm, WorkspaceInvitation, WorkspaceMember, WorkspaceMemberForm, WorkspaceRole } from "@/shared/types";
 
 type TeamSurfaceProps = {
   teamMembers: WorkspaceMember[];
-  teamMe: WorkspaceMe | null;
   teamMemberForm: WorkspaceMemberForm;
   setTeamMemberForm: Dispatch<SetStateAction<WorkspaceMemberForm>>;
   addTeamMember: (event: React.FormEvent<HTMLFormElement>) => void | Promise<void>;
@@ -20,7 +20,6 @@ type TeamSurfaceProps = {
   retryTeamInvitation: (invitationId: number) => void | Promise<void>;
   requestCancelInvitation: (invite: WorkspaceInvitation) => void;
   teamInvitationMessage: string;
-  formatTime: (value: unknown) => string;
   webhooks: Webhook[];
   webhookForm: WebhookForm;
   setWebhookForm: Dispatch<SetStateAction<WebhookForm>>;
@@ -40,7 +39,6 @@ function toWebhookPlatform(value: string): WebhookForm["platform"] {
 
 export function TeamSurface({
   teamMembers,
-  teamMe,
   teamMemberForm,
   setTeamMemberForm,
   addTeamMember,
@@ -50,13 +48,13 @@ export function TeamSurface({
   retryTeamInvitation,
   requestCancelInvitation,
   teamInvitationMessage,
-  formatTime,
   webhooks,
   webhookForm,
   setWebhookForm,
   handleSaveWebhook,
   webhookSaving
 }: TeamSurfaceProps) {
+  const { teamMe, formatTime } = useWorkbenchSessionContext();
   const canManageMembers = teamMe?.isOwner || teamMe?.role === "admin" || teamMe?.role === "owner";
   const canManageWebhooks = canManageMembers;
   const [showWebhookEditor, setShowWebhookEditor] = useState(false);
