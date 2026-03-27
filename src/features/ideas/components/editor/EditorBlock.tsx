@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
 import { marked, type Tokens } from "marked";
 
@@ -15,7 +15,9 @@ export type BlockType =
   | "quote"
   | "code"
   | "divider"
-  | "file";
+  | "file"
+  | "callout"
+  | "image";
 
 export type EditorBlockData = {
   id: string;
@@ -42,6 +44,23 @@ const PREFIX_RULES: Array<{ pattern: RegExp; type: BlockType; strip: boolean }> 
   { pattern: /^```/, type: "code", strip: false },
   { pattern: /^---$/, type: "divider", strip: false },
 ];
+
+const SLASH_OPTIONS: Array<{ type: BlockType; icon: string; label: string; keywords: string[] }> = [
+  { type: "heading1", icon: "H1", label: "제목 1", keywords: ["h1", "heading1", "제목"] },
+  { type: "heading2", icon: "H2", label: "제목 2", keywords: ["h2", "heading2", "제목"] },
+  { type: "heading3", icon: "H3", label: "제목 3", keywords: ["h3", "heading3", "제목"] },
+  { type: "bulletList", icon: "•", label: "글머리 목록", keywords: ["bullet", "list", "ul", "목록"] },
+  { type: "numberedList", icon: "1.", label: "번호 목록", keywords: ["numbered", "ol", "번호"] },
+  { type: "checklist", icon: "☑", label: "체크리스트", keywords: ["check", "todo", "체크"] },
+  { type: "quote", icon: "❝", label: "인용", keywords: ["quote", "인용", "blockquote"] },
+  { type: "code", icon: "</>", label: "코드", keywords: ["code", "코드"] },
+  { type: "callout", icon: "💬", label: "콜아웃", keywords: ["callout", "info", "알림", "강조"] },
+  { type: "image", icon: "🖼️", label: "이미지", keywords: ["image", "img", "이미지", "사진"] },
+  { type: "divider", icon: "—", label: "구분선", keywords: ["divider", "hr", "구분"] },
+  { type: "paragraph", icon: "¶", label: "단락", keywords: ["p", "paragraph", "단락", "text"] },
+];
+
+const FEATURED_SLASH_TYPES: BlockType[] = ["paragraph", "heading2", "bulletList"];
 
 export function detectBlockType(
   content: string,
@@ -170,11 +189,29 @@ function sanitizeLinkHref(value: string): string {
   return "";
 }
 
+function highlightMatch(text: string, query: string): ReactNode {
+  if (!query) {
+    return text;
+  }
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) {
+    return text;
+  }
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="rounded-sm bg-[var(--accent)]/20 text-[var(--accent)]">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
 type EditorBlockProps = {
   block: EditorBlockData;
   isEditing: boolean;
   onFocus: () => void;
   onChange: (content: string, type?: BlockType, options?: { checked?: boolean }) => void;
+  onTypeChange?: (type: BlockType) => void;
   onFileUpload?: (file: File) => Promise<void>;
   onEnter: () => void;
   onDelete: () => void;
@@ -186,6 +223,7 @@ export function EditorBlock({
   isEditing,
   onFocus,
   onChange,
+  onTypeChange,
   onFileUpload,
   onEnter,
   onDelete,
@@ -193,7 +231,63 @@ export function EditorBlock({
 }: EditorBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  const [slashActive, setSlashActive] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
   const localContent = block.content || "";
+
+  const filteredSlashOptions = useMemo(() => {
+    if (!slashActive) {
+      return [];
+    }
+    if (!slashQuery) {
+      return SLASH_OPTIONS;
+    }
+    return SLASH_OPTIONS.filter((opt) =>
+      opt.label.toLowerCase().includes(slashQuery)
+      || opt.keywords.some((kw) => kw.toLowerCase().includes(slashQuery))
+      || opt.type.toLowerCase().includes(slashQuery)
+    );
+  }, [slashActive, slashQuery]);
+
+  const displayOptions = useMemo(() => {
+    if (!slashActive) {
+      return [] as Array<{ type: BlockType | "___divider___"; icon: string; label: string; keywords: string[] }>;
+    }
+    if (slashQuery) {
+      return filteredSlashOptions;
+    }
+
+    const featured = filteredSlashOptions.filter((opt) => FEATURED_SLASH_TYPES.includes(opt.type));
+    const rest = filteredSlashOptions.filter((opt) => !FEATURED_SLASH_TYPES.includes(opt.type));
+    if (featured.length === 0 || rest.length === 0) {
+      return [...featured, ...rest];
+    }
+    return [
+      ...featured,
+      { type: "___divider___", icon: "", label: "", keywords: [] },
+      ...rest,
+    ];
+  }, [filteredSlashOptions, slashActive, slashQuery]);
+
+  const selectableSlashOptions = useMemo(
+    () => displayOptions.filter((opt) => opt.type !== "___divider___") as typeof filteredSlashOptions,
+    [displayOptions]
+  );
+
+  const applySlashCommand = useCallback(
+    (type: BlockType) => {
+      setSlashActive(false);
+      setSlashQuery("");
+      setSlashSelectedIndex(0);
+      if (onTypeChange) {
+        onTypeChange(type);
+      } else {
+        onChange("", type);
+      }
+    },
+    [onTypeChange, onChange]
+  );
 
   // Auto-focus when entering edit mode
   useEffect(() => {
@@ -210,23 +304,120 @@ export function EditorBlock({
       if (isComposingRef.current || native?.isComposing || native?.keyCode === 229) {
         return;
       }
+      if (slashActive) {
+        if (e.key === "ArrowDown" && selectableSlashOptions.length > 0) {
+          e.preventDefault();
+          setSlashSelectedIndex((prev) => (prev + 1) % selectableSlashOptions.length);
+          return;
+        }
+        if (e.key === "ArrowUp" && selectableSlashOptions.length > 0) {
+          e.preventDefault();
+          setSlashSelectedIndex((prev) => (prev - 1 + selectableSlashOptions.length) % selectableSlashOptions.length);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const selected = selectableSlashOptions[slashSelectedIndex];
+          if (selected) {
+            applySlashCommand(selected.type);
+          }
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSlashActive(false);
+          setSlashQuery("");
+          setSlashSelectedIndex(0);
+          onChange(`/${slashQuery}`);
+          return;
+        }
+        if (e.key === "Backspace" && slashQuery === "") {
+          e.preventDefault();
+          setSlashActive(false);
+          setSlashQuery("");
+          setSlashSelectedIndex(0);
+          onChange("");
+          return;
+        }
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        if (block.type === "bulletList" || block.type === "numberedList" || block.type === "checklist") {
+          const textarea = textareaRef.current;
+          if (textarea) {
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            if (!e.shiftKey) {
+              const newValue = localContent.slice(0, start) + "  " + localContent.slice(end);
+              onChange(newValue);
+              requestAnimationFrame(() => {
+                if (textareaRef.current) {
+                  textareaRef.current.setSelectionRange(start + 2, start + 2);
+                }
+              });
+            } else {
+              const lineStart = localContent.lastIndexOf("\n", start - 1) + 1;
+              const linePrefix = localContent.slice(lineStart, start);
+              const spacesToRemove = linePrefix.startsWith("  ") ? 2 : linePrefix.startsWith(" ") ? 1 : 0;
+              if (spacesToRemove > 0) {
+                const newValue = localContent.slice(0, lineStart) + localContent.slice(lineStart + spacesToRemove);
+                onChange(newValue);
+                requestAnimationFrame(() => {
+                  if (textareaRef.current) {
+                    textareaRef.current.setSelectionRange(
+                      Math.max(lineStart, start - spacesToRemove),
+                      Math.max(lineStart, start - spacesToRemove)
+                    );
+                  }
+                });
+              }
+            }
+          }
+        }
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         onChange(localContent);
         onEnter();
         return;
       }
-      if (e.key === "Backspace" && localContent === "") {
+      if (e.key === "Backspace" && localContent === "" && !slashActive) {
         e.preventDefault();
         onDelete();
       }
     },
-    [localContent, onChange, onEnter, onDelete]
+    [
+      applySlashCommand,
+      block.type,
+      localContent,
+      onChange,
+      onDelete,
+      onEnter,
+      selectableSlashOptions,
+      slashActive,
+      slashQuery,
+      slashSelectedIndex,
+    ]
   );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value;
+
+      if (value.startsWith("/")) {
+        const query = value.slice(1).toLowerCase();
+        setSlashActive(true);
+        setSlashQuery(query);
+        setSlashSelectedIndex(0);
+        return;
+      }
+
+      if (slashActive) {
+        setSlashActive(false);
+        setSlashQuery("");
+        setSlashSelectedIndex(0);
+      }
 
       const detected = detectBlockType(value, block.type);
       if (detected) {
@@ -235,15 +426,77 @@ export function EditorBlock({
         onChange(value);
       }
     },
-    [block.type, onChange]
+    [block.type, onChange, slashActive]
   );
 
-  const rows = Math.max(1, localContent.split("\n").length);
+  const editingValue = slashActive ? `/${slashQuery}` : localContent;
+  const rows = Math.max(1, editingValue.split("\n").length);
   const inlineNodes = useMemo(() => inlineTokens(localContent || ""), [localContent]);
   const listLines = useMemo(() => {
-    const lines = localContent.split("\n").map((line) => line.trim()).filter(Boolean);
-    return toStableLineEntries(lines.length ? lines : [""]);
+    const rawLines = localContent.split("\n");
+    const counts = new Map<string, number>();
+    const entries: { line: string; rawLine: string; key: string }[] = [];
+    for (const raw of rawLines) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const keyBase = trimmed || "__empty__";
+      const count = (counts.get(keyBase) || 0) + 1;
+      counts.set(keyBase, count);
+      entries.push({ line: trimmed, rawLine: raw, key: `${keyBase}-${count}` });
+    }
+    if (entries.length === 0) entries.push({ line: "", rawLine: "", key: "__empty__-1" });
+    return entries;
   }, [localContent]);
+  const textareaBlockClass = (() => {
+    switch (block.type) {
+      case "heading1":
+        return "text-2xl font-bold leading-snug";
+      case "heading2":
+        return "text-xl font-bold leading-snug";
+      case "heading3":
+        return "text-lg font-semibold leading-snug";
+      case "quote":
+        return "border-l-2 border-[var(--border)] pl-3 text-[var(--muted)] italic";
+      case "code":
+        return "font-mono text-xs bg-[var(--surface-strong)] rounded-md p-2";
+      case "callout":
+        return "rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 px-4 py-2 text-sm";
+      case "image":
+        return "font-mono text-xs text-[var(--muted)]";
+      case "bulletList":
+      case "numberedList":
+      case "checklist":
+        return "pl-4";
+      default:
+        return "text-sm leading-relaxed";
+    }
+  })();
+  const placeholderText = (() => {
+    switch (block.type) {
+      case "heading1":
+        return "제목 1...";
+      case "heading2":
+        return "제목 2...";
+      case "heading3":
+        return "제목 3...";
+      case "quote":
+        return "인용문을 입력하세요...";
+      case "code":
+        return "코드를 입력하세요...";
+      case "bulletList":
+        return "• 목록 항목 입력...";
+      case "numberedList":
+        return "1. 목록 항목 입력...";
+      case "checklist":
+        return "할 일을 입력하세요...";
+      case "callout":
+        return "💡 콜아웃 텍스트 (시작에 이모지 넣기 가능)...";
+      case "image":
+        return "이미지 URL을 입력하세요 (https://...)";
+      default:
+        return "/ 로 블록 전환, 텍스트 입력...";
+    }
+  })();
 
   const activateOnPointer = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
@@ -354,24 +607,79 @@ export function EditorBlock({
   // --- Edit mode ---
   if (isEditing) {
     return (
-      <textarea
-        ref={textareaRef}
-        className="w-full resize-none rounded-md border-0 bg-transparent p-1 text-sm leading-relaxed text-[var(--foreground)] outline-none focus:ring-0"
-        rows={rows}
-        value={localContent}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        onCompositionStart={() => {
-          isComposingRef.current = true;
-        }}
-        onCompositionEnd={() => {
-          queueMicrotask(() => {
-            isComposingRef.current = false;
-          });
-        }}
-        onBlur={() => onChange(localContent)}
-        placeholder={block.type === "code" ? "코드를 입력하세요..." : "텍스트를 입력하세요..."}
-      />
+      <div className="relative">
+        <textarea
+          ref={textareaRef}
+          className={`w-full resize-none border-0 bg-transparent p-1 text-[var(--foreground)] outline-none focus:ring-0 ${textareaBlockClass} ${block.type === "code" ? "" : "rounded-md"}`}
+          rows={rows}
+          value={editingValue}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            queueMicrotask(() => {
+              isComposingRef.current = false;
+            });
+          }}
+          onBlur={() => {
+            if (slashActive) {
+              setSlashActive(false);
+              setSlashQuery("");
+              setSlashSelectedIndex(0);
+            } else {
+              onChange(localContent);
+            }
+          }}
+          placeholder={placeholderText}
+        />
+
+        {slashActive && (displayOptions.length > 0 || Boolean(slashQuery)) && (
+          <div className="absolute left-0 top-full z-50 mt-1 w-52 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg">
+            <div className="border-b border-[var(--border)] px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+              {slashQuery ? `"${slashQuery}" 검색 결과` : "블록 전환"}
+            </div>
+            {!slashQuery ? (
+              <div className="border-b border-[var(--border)] px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-[var(--muted)]">
+                자주 쓰는 블록
+              </div>
+            ) : null}
+            {slashQuery && displayOptions.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-[var(--muted)]">일치하는 블록 유형이 없습니다</p>
+            ) : (
+              (() => {
+                let selectableIndex = -1;
+                return displayOptions.map((opt, idx) => {
+                  if (opt.type === "___divider___") {
+                    return <div key="slash-palette-separator" className="my-0.5 border-t border-[var(--border)]" />;
+                  }
+                  selectableIndex += 1;
+                  const isSelected = selectableIndex === slashSelectedIndex;
+                  return (
+                    <button
+                      key={opt.type}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        applySlashCommand(opt.type);
+                      }}
+                      className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm transition ${
+                        isSelected
+                          ? "bg-[var(--accent)]/10 text-[var(--accent)]"
+                          : "text-[var(--foreground)] hover:bg-[var(--surface-strong)]"
+                      }`}
+                    >
+                      <span className="w-6 text-center font-mono text-xs text-[var(--muted)]">{opt.icon}</span>
+                      <span>{highlightMatch(opt.label, slashQuery)}</span>
+                    </button>
+                  );
+                });
+              })()
+            )}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -404,24 +712,49 @@ export function EditorBlock({
 
   if (block.type === "bulletList") {
     return (
-      <ul className={`${commonClass} list-disc pl-5 text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
-        {listLines.map((entry) => (
-          <li key={`bullet-${entry.key}`} className="ml-1">
-            {renderInline(inlineTokens(entry.line), !entry.line)}
-          </li>
-        ))}
+      <ul className={`${commonClass} text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {listLines.map((entry) => {
+          const spaces = entry.rawLine.match(/^(\s*)/)?.[1]?.length || 0;
+          const level = Math.floor(spaces / 2);
+          const bulletChars = ["\u2022", "\u25E6", "\u25AA"];
+          const bullet = bulletChars[Math.min(level, bulletChars.length - 1)];
+          return (
+            <div
+              key={`bullet-${entry.key}`}
+              className="flex items-start gap-1.5"
+              style={{ paddingLeft: `${level * 16}px` }}
+            >
+              <span className="mt-0.5 shrink-0 text-[var(--muted)]" style={{ fontSize: level === 0 ? "1em" : "0.85em" }}>{bullet}</span>
+              <span>{renderInline(inlineTokens(entry.line), !entry.line)}</span>
+            </div>
+          );
+        })}
       </ul>
     );
   }
 
   if (block.type === "numberedList") {
+    let levelCounters: number[] = [];
     return (
-      <ol className={`${commonClass} list-decimal pl-5 text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
-        {listLines.map((entry) => (
-          <li key={`number-${entry.key}`} className="ml-1">
-            {renderInline(inlineTokens(entry.line), !entry.line)}
-          </li>
-        ))}
+      <ol className={`${commonClass} text-sm leading-relaxed text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
+        {listLines.map((entry) => {
+          const spaces = entry.rawLine.match(/^(\s*)/)?.[1]?.length || 0;
+          const level = Math.floor(spaces / 2);
+          while (levelCounters.length <= level) levelCounters.push(0);
+          levelCounters[level] = (levelCounters[level] || 0) + 1;
+          if (level < levelCounters.length - 1) levelCounters = levelCounters.slice(0, level + 1);
+          const num = levelCounters[level];
+          return (
+            <div
+              key={`num-${entry.key}`}
+              className="flex items-start gap-1.5"
+              style={{ paddingLeft: `${level * 16}px` }}
+            >
+              <span className="mt-0.5 w-5 shrink-0 text-right text-[var(--muted)]">{num}.</span>
+              <span>{renderInline(inlineTokens(entry.line), !entry.line)}</span>
+            </div>
+          );
+        })}
       </ol>
     );
   }
@@ -443,6 +776,48 @@ export function EditorBlock({
       <pre className={`${commonClass} overflow-auto rounded-md bg-[var(--surface-strong)] p-3 text-xs text-[var(--foreground)]`} onMouseDown={activateOnPointer}>
         <code>{localContent || "\u00A0"}</code>
       </pre>
+    );
+  }
+
+  if (block.type === "callout") {
+    const [emoji, ...rest] = (localContent || "").split(" ");
+    const isEmoji = emoji && /\p{Emoji}/u.test(emoji);
+    const calloutEmoji = isEmoji ? emoji : "💡";
+    const calloutText = isEmoji ? rest.join(" ") : localContent;
+    return (
+      <button
+        type="button"
+        className="flex w-full cursor-pointer items-start gap-3 rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 px-4 py-3 text-left transition hover:bg-[var(--accent)]/8"
+        onMouseDown={activateOnPointer}
+      >
+        <span className="mt-0.5 shrink-0 text-lg">{calloutEmoji}</span>
+        <p className="text-sm leading-relaxed text-[var(--foreground)]">{calloutText || "\u00A0"}</p>
+      </button>
+    );
+  }
+
+  if (block.type === "image") {
+    const url = localContent.trim();
+    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+      return (
+        <button
+          type="button"
+          className="block w-full cursor-pointer overflow-hidden rounded-lg border border-[var(--border)] text-left"
+          onMouseDown={activateOnPointer}
+        >
+          <Image src={url} alt="" width={1280} height={720} unoptimized className="max-h-80 w-full object-contain" />
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-[var(--border)] py-8 text-center transition hover:border-[var(--accent)]/40"
+        onMouseDown={activateOnPointer}
+      >
+        <span className="text-3xl">🖼️</span>
+        <p className="text-sm text-[var(--muted)]">클릭하여 이미지 URL 입력</p>
+      </button>
     );
   }
 

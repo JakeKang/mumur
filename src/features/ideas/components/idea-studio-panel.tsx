@@ -4,10 +4,13 @@ import { MentionAssistPanel } from "@/features/ideas/components/mention-assist-p
 import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent } from "@/shared/components/ui/card";
 import { categoryLabel, timelineEventLabel } from "@/shared/constants/ui-labels";
-import { ArrowLeft, ScrollText, SquarePen } from "lucide-react";
+import { ArrowLeft, MessageSquare, PanelRightClose, PanelRightOpen, ScrollText, SquarePen } from "lucide-react";
+import { useWorkbenchSessionContext } from "@/modules/workbench/presentation/contexts/workbench-contexts";
 import { Input } from "@/shared/components/ui/input";
 import { BlockEditor } from "@/features/ideas/components/editor/BlockEditor";
-import { PriorityBadge } from "@/shared/components/ui/priority-badge";
+
+import { DrawerShell } from "@/shared/components/ui/drawer-shell";
+import { ConfirmDialog } from "@/shared/components/ui/confirm-dialog";
 
 export function IdeaStudioPanel({
   selectedIdea,
@@ -17,20 +20,15 @@ export function IdeaStudioPanel({
   STATUS_META,
   handleSaveIdea,
   blocks,
-  setCommentBlockId,
-  commentDraft,
-  setCommentDraft,
   handleCreateComment,
   handleUpdateComment,
   handleDeleteComment,
-  commentBlockId,
   comments,
   commentFilterBlockId,
   setCommentFilterBlockId,
   applyCommentFilter,
   reactionsByTarget,
   handleReaction,
-  formatTime,
   handleCreateVersion,
   handleRestoreVersion,
   versionForm,
@@ -38,14 +36,20 @@ export function IdeaStudioPanel({
   versions,
   timeline,
   teamMembers,
-  myRole,
-  canEditIdea,
-  currentUserId,
   handleUploadBlockFile
 }) {
+  const { teamMe, canEditIdea, formatTime } = useWorkbenchSessionContext();
+  const myRole = teamMe?.role ?? null;
+  const currentUserId = teamMe?.userId ?? null;
   const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentDraft, setEditingCommentDraft] = useState("");
+  const [deleteCommentId, setDeleteCommentId] = useState<number | null>(null);
   const [commentMentionIndex, setCommentMentionIndex] = useState(0);
+  const [blockCommentPanelOpen, setBlockCommentPanelOpen] = useState(false);
+  const [blockCommentPanelBlockId, setBlockCommentPanelBlockId] = useState<string>("");
+  const [globalCommentPanelOpen, setGlobalCommentPanelOpen] = useState(false);
+  const [globalCommentDraft, setGlobalCommentDraft] = useState("");
+  const [blockCommentDraft, setBlockCommentDraft] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<null | {
     versionId: number;
     label: string;
@@ -93,11 +97,16 @@ export function IdeaStudioPanel({
     }
     window.localStorage.setItem("mumur.mentions.recentEmails", JSON.stringify(recentMentionEmails));
   }, [recentMentionEmails]);
+
+
   const isReadOnly = !canEditIdea || myRole === "viewer";
   const canModerate = myRole === "admin" || myRole === "owner";
   const ideaPriority = useMemo(() => {
     if (!selectedIdea) {
       return "low";
+    }
+    if ((selectedIdea as { priority?: string }).priority) {
+      return (selectedIdea as { priority?: string }).priority as string;
     }
     if (selectedIdea.priorityLevel) {
       return selectedIdea.priorityLevel;
@@ -173,8 +182,8 @@ export function IdeaStudioPanel({
       .slice(0, 6);
   };
 
-  const commentMentionToken = mentionTokenFromText(commentDraft);
-  const commentMentionContext = hasMentionContextFromText(commentDraft);
+  const commentMentionToken = mentionTokenFromText(globalCommentDraft);
+  const commentMentionContext = hasMentionContextFromText(globalCommentDraft);
   const commentMentionMatches = mentionMatches(commentMentionToken, commentMentionContext);
   const mentionPreviewMembers = (value) => {
     const tokens = extractMentionTokens(value);
@@ -189,7 +198,17 @@ export function IdeaStudioPanel({
     });
     return collected;
   };
-  const commentMentionPreview = mentionPreviewMembers(commentDraft);
+  const commentMentionPreview = mentionPreviewMembers(globalCommentDraft);
+
+  const globalComments = useMemo(
+    () => comments.filter((c) => !c.blockId || c.blockId === "").sort((a, b) => Number(b.createdAt) - Number(a.createdAt)),
+    [comments]
+  );
+
+  const blockComments = useMemo(
+    () => comments.filter((c) => c.blockId === blockCommentPanelBlockId).sort((a, b) => Number(b.createdAt) - Number(a.createdAt)),
+    [comments, blockCommentPanelBlockId]
+  );
 
   const activeCommentMentionIndex = commentMentionMatches.length
     ? Math.min(commentMentionIndex, commentMentionMatches.length - 1)
@@ -287,43 +306,64 @@ export function IdeaStudioPanel({
           </section>
         ) : (
           <>
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-              <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-                <span className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs font-medium text-[var(--foreground)]">
-                  <SquarePen className="h-3.5 w-3.5" />
-                  블록 에디터
-                </span>
-                <select
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-xs text-[var(--foreground)]"
-                  value={selectedIdea.status}
-                  onChange={(event) => {
-                    if (isReadOnly) {
-                      return;
-                    }
-                    void handleSaveIdea(null, { status: event.target.value });
-                  }}
-                  disabled={isReadOnly}
-                  aria-label="문서 상태 변경"
-                  title={isReadOnly ? "viewer 권한에서는 상태를 변경할 수 없습니다" : "문서 상태 변경"}
-                >
-                  {Object.keys(STATUS_META).map((key) => {
-                    const meta = STATUS_META[key];
-                    return (
-                      <option key={`studio-status-${key}`} value={key}>{meta.icon} {meta.label}</option>
-                    );
-                  })}
-                </select>
-                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">우선순위 <PriorityBadge level={ideaPriority} /></span>
-                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">생성 {formatTime(selectedIdea.createdAt)}</span>
-                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">수정 {formatTime(selectedIdea.updatedAt)}</span>
-                <span className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1">분류 {categoryLabel(selectedIdea.category)}</span>
-                <Button size="sm" variant="outline" onClick={onBackToList} className="ml-auto">
-                  <ArrowLeft className="mr-1 h-4 w-4" />
+            <div>
+              <div className="flex items-center gap-3 border-b border-[var(--border)] px-1 py-1.5">
+                {/* Left: back button */}
+                <Button size="sm" variant="ghost" onClick={onBackToList} className="shrink-0 gap-1.5 text-[var(--muted)] hover:text-[var(--foreground)]">
+                  <ArrowLeft className="h-4 w-4" />
                   목록으로
                 </Button>
+
+                {/* Divider */}
+                <span className="h-4 w-px bg-[var(--border)]" />
+
+                {/* Title */}
+                <p className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--foreground)]">
+                  {selectedIdea.title || "제목 없음"}
+                </p>
+
+                {/* Right: status + priority + timestamps */}
+                <div className="flex shrink-0 items-center gap-2">
+                  <select
+                    className="h-7 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs text-[var(--foreground)]"
+                    value={selectedIdea.status}
+                    onChange={(event) => {
+                      if (isReadOnly) {
+                        return;
+                      }
+                      void handleSaveIdea(null, { status: event.target.value });
+                    }}
+                    disabled={isReadOnly}
+                    aria-label="문서 상태 변경"
+                    title={isReadOnly ? "viewer 권한에서는 상태를 변경할 수 없습니다" : "문서 상태 변경"}
+                  >
+                    {Object.keys(STATUS_META).map((key) => {
+                      const meta = STATUS_META[key];
+                      return (
+                        <option key={`studio-status-${key}`} value={key}>{meta.icon} {meta.label}</option>
+                      );
+                    })}
+                  </select>
+                  <select
+                    className="h-7 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 text-xs text-[var(--foreground)]"
+                    value={ideaPriority}
+                    onChange={(event) => {
+                      if (isReadOnly) return;
+                      void handleSaveIdea(null, { priority: event.target.value });
+                    }}
+                    disabled={isReadOnly}
+                    aria-label="중요도 변경"
+                    title={isReadOnly ? "viewer 권한에서는 중요도를 변경할 수 없습니다" : "중요도 변경"}
+                  >
+                    <option value="low">🟢 낮음</option>
+                    <option value="medium">🟡 중간</option>
+                    <option value="high">🔴 높음</option>
+                  </select>
+                  <span className="hidden text-xs text-[var(--muted)] xl:block">수정 {formatTime(selectedIdea.updatedAt)}</span>
+                </div>
               </div>
 
-              <div className="mt-3 flex items-center border-b border-[var(--border)]">
+              <div className="flex items-center border-b border-[var(--border)] px-1">
                 <div className="flex flex-1 flex-wrap gap-0">
                   <button
                     type="button"
@@ -347,10 +387,10 @@ export function IdeaStudioPanel({
                     <ScrollText className="h-4 w-4" /> 문서/타임라인
                   </button>
                 </div>
-
               </div>
+
               {isReadOnly ? (
-                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
+                <p className="mx-1 my-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
                   viewer 권한에서는 편집 탭이 비활성화됩니다. 문서 탭에서 타임라인을 확인할 수 있습니다.
                 </p>
               ) : null}
@@ -379,9 +419,9 @@ export function IdeaStudioPanel({
                 }}
                 onUploadFile={handleUploadBlockFile}
                 onOpenBlockComments={(blockId) => {
-                  setCommentBlockId(blockId);
-                  setCommentFilterBlockId(blockId);
-                  setStudioTab("editor");
+                  setBlockCommentPanelBlockId(blockId);
+                  setBlockCommentPanelOpen(true);
+                  setBlockCommentDraft("");
                 }}
                 onBlockReaction={async (blockId, emoji) => {
                   await handleReaction(emoji, "block", blockId);
@@ -390,213 +430,72 @@ export function IdeaStudioPanel({
             ) : null}
 
             {studioTab === "editor" ? (
-              <>
-                <div className="grid gap-3 xl:grid-cols-[1fr_320px]">
-                  <div className="space-y-2">
-            <section className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-medium">댓글</p>
-                <Badge>{`${comments.length}개 댓글`}</Badge>
-              </div>
-              <form
-                className="flex flex-wrap gap-2"
-                onSubmit={(event) => {
-                  if (isReadOnly) {
-                    event.preventDefault();
-                    return;
-                  }
-                  void handleCreateComment(event);
-                }}
-              >
-                <Input
-                  className="min-w-[240px] flex-1"
-                  value={commentDraft}
-                  placeholder="댓글 입력 (@email 또는 @이름공백없이 멘션)"
-                  aria-label="댓글 입력"
-                  aria-haspopup="listbox"
-                  aria-autocomplete="list"
-                  aria-expanded={commentMentionMatches.length > 0}
-                  aria-controls={commentMentionMatches.length ? commentMentionListboxId : undefined}
-                  aria-activedescendant={commentMentionMatches.length ? activeCommentMentionOptionId : undefined}
-                  aria-describedby={commentMentionMatches.length ? commentMentionStatusId : undefined}
-                  onChange={(event) => {
-                    setCommentDraft(event.target.value);
-                    setCommentMentionIndex(0);
-                  }}
-                  onKeyDown={(event) =>
-                    handleMentionKeyDown(
-                      event,
-                      commentMentionMatches,
-                      activeCommentMentionIndex,
-                      setCommentMentionIndex,
-                      setCommentDraft,
-                      commentDraft
-                    )
-                  }
-                  disabled={isReadOnly}
-                  required
-                />
-                <select
-                  className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
-                  value={commentBlockId}
-                  onChange={(event) => setCommentBlockId(event.target.value)}
-                  disabled={isReadOnly}
-                >
-                  <option value="">아이디어 전체</option>
-                  {blocks.map((block) => (
-                    <option key={block.id} value={block.id}>
-                      {block.id}
-                    </option>
-                  ))}
-                </select>
-                <Button type="submit" disabled={isReadOnly}>등록</Button>
-              </form>
-              <MentionAssistPanel
-                matches={commentMentionMatches}
-                activeIndex={activeCommentMentionIndex}
-                setActiveIndex={setCommentMentionIndex}
-                applyMention={applyMention}
-                draft={commentDraft}
-                setDraft={setCommentDraft}
-                preview={commentMentionPreview}
-                removeMention={removeMention}
-                statusId={commentMentionStatusId}
-                listboxId={commentMentionListboxId}
-                activeOptionId={activeCommentMentionOptionId}
-                announcement={commentMentionAnnouncement}
-                helpId="comment-mention-help"
-                helpText=""
-                listboxLabel="댓글 멘션 후보"
-                previewTitle="멘션 대상 미리보기"
-              />
-              <div className="flex items-center gap-2">
-                <select
-                  className="h-10 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm"
-                  value={commentFilterBlockId}
-                  onChange={(event) => setCommentFilterBlockId(event.target.value)}
-                >
-                  <option value="">전체 블록</option>
-                  {blocks.map((block) => (
-                    <option key={block.id} value={block.id}>
-                      {block.id}
-                    </option>
-                  ))}
-                </select>
-                <Button variant="outline" onClick={applyCommentFilter}>
-                  필터 적용
-                </Button>
-              </div>
-              <div className="grid gap-2">
-                {comments.length ? (
-                  comments.map((comment) => (
-                    <div key={comment.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                      <div className="mb-1 flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium">{comment.userName}</p>
-                        {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
-                          <div className="flex items-center gap-1">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setEditingCommentId(comment.id);
-                                setEditingCommentDraft(comment.content || "");
-                              }}
-                            >
-                              수정
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={async () => {
-                                if (confirm("이 댓글을 삭제할까요?")) {
-                                  await handleDeleteComment(comment.id);
-                                  if (editingCommentId === comment.id) {
-                                    setEditingCommentId(null);
-                                    setEditingCommentDraft("");
-                                  }
-                                }
-                              }}
-                            >
-                              삭제
-                            </Button>
-                          </div>
-                        ) : null}
-                      </div>
-                      {editingCommentId === comment.id ? (
-                        <div className="space-y-2">
-                          <Input
-                            value={editingCommentDraft}
-                            onChange={(event) => setEditingCommentDraft(event.target.value)}
-                            placeholder="댓글 수정"
-                          />
-                          <div className="flex items-center gap-1">
-                            <Button
-                              type="button"
-                              size="sm"
-                              onClick={async () => {
-                                const next = editingCommentDraft.trim();
-                                if (!next) {
-                                  return;
-                                }
-                                await handleUpdateComment(comment.id, next);
-                                setEditingCommentId(null);
-                                setEditingCommentDraft("");
-                              }}
-                            >
-                              저장
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setEditingCommentId(null);
-                                setEditingCommentDraft("");
-                              }}
-                            >
-                              취소
-                            </Button>
-                          </div>
-                        </div>
-                      ) : (
-                        <p className="text-sm">{comment.content}</p>
-                      )}
-                      <div className="mt-1 flex flex-wrap items-center gap-1">
-                        {["👍", "🔥", "✅"].map((emoji) => {
-                          const targetId = `idea:${comment.id}`;
-                          const key = `comment:${targetId}`;
-                          const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
-                          const item = (summary.reactions || []).find((row) => row.emoji === emoji);
-                          const mine = (summary.mine || []).includes(emoji);
-                          return (
-                            <Button
-                              key={`comment-reaction-${comment.id}-${emoji}`}
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className={mine ? "border-[var(--accent)]" : undefined}
-                              onClick={() => handleReaction(emoji, "comment", targetId)}
-                              disabled={isReadOnly}
-                            >
-                              {emoji} {item?.count || 0}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                      <p className="text-xs text-[var(--muted)]">{`${comment.blockId || "아이디어"} · ${formatTime(comment.createdAt)}`}</p>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-sm text-[var(--muted)]">댓글 없음</p>
-                )}
-              </div>
-            </section>
-
+              <section className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-[var(--foreground)]">전체 댓글</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--muted)]">{globalComments.length}개</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1.5 px-2 text-xs"
+                      onClick={() => setGlobalCommentPanelOpen((prev) => !prev)}
+                      aria-expanded={globalCommentPanelOpen}
+                      aria-controls="global-comment-thread-panel"
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      문서 댓글 스레드
+                      {globalCommentPanelOpen ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
+                    </Button>
                   </div>
                 </div>
-              </>
+                {!isReadOnly ? (
+                  <form
+                    className="flex gap-2"
+                    onSubmit={async (event) => {
+                      if (!globalCommentDraft.trim()) {
+                        event.preventDefault();
+                        return;
+                      }
+                      await handleCreateComment(event, "", globalCommentDraft);
+                      setGlobalCommentDraft("");
+                      setCommentMentionIndex(0);
+                    }}
+                  >
+                    <Input
+                      value={globalCommentDraft}
+                      placeholder="댓글 입력..."
+                      aria-label="댓글 입력"
+                      onChange={(event) => {
+                        setGlobalCommentDraft(event.target.value);
+                        setCommentMentionIndex(0);
+                      }}
+                    />
+                    <Button type="submit" size="sm" disabled={!globalCommentDraft.trim()}>등록</Button>
+                  </form>
+                ) : null}
+                <p className="text-xs text-[var(--muted)]">블록 댓글은 블록의 💬 버튼에서, 문서 전체 댓글은 “문서 댓글 스레드”에서 관리합니다.</p>
+                {globalComments.length ? (
+                  <div className="space-y-1 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
+                    {globalComments.slice(0, 2).map((comment) => (
+                      <div key={`global-preview-${comment.id}`} className="rounded px-1.5 py-1 text-xs text-[var(--foreground)]">
+                        <span className="mr-1 font-semibold">{comment.userName}:</span>
+                        <span>{comment.content}</span>
+                      </div>
+                    ))}
+                    {globalComments.length > 2 ? (
+                      <button
+                        type="button"
+                        className="px-1.5 text-[11px] text-[var(--accent)] hover:underline"
+                        onClick={() => setGlobalCommentPanelOpen(true)}
+                      >
+                        댓글 {globalComments.length - 2}개 더 보기
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </section>
             ) : null}
 
             {studioTab === "docs" ? (
@@ -706,6 +605,261 @@ export function IdeaStudioPanel({
         )}
       </CardContent>
 
+      <DrawerShell
+        open={globalCommentPanelOpen}
+        title="문서 전체 댓글"
+        description="문서 단위 토론 스레드"
+        onClose={() => {
+          setGlobalCommentPanelOpen(false);
+          setCommentMentionIndex(0);
+          setGlobalCommentDraft("");
+        }}
+        widthClass="max-w-lg"
+      >
+        <div id="global-comment-thread-panel" className="space-y-3">
+          {!isReadOnly && (
+            <form
+              className="flex gap-2"
+              onSubmit={async (event) => {
+                if (!globalCommentDraft.trim()) {
+                  event.preventDefault();
+                  return;
+                }
+                await handleCreateComment(event, "", globalCommentDraft);
+                setGlobalCommentDraft("");
+                setCommentMentionIndex(0);
+              }}
+            >
+              <div className="relative min-w-0 flex-1">
+                <Input
+                  value={globalCommentDraft}
+                  placeholder="문서 댓글 입력... (@멘션 지원)"
+                  aria-label="문서 댓글 입력"
+                  aria-haspopup="listbox"
+                  aria-autocomplete="list"
+                  aria-expanded={commentMentionMatches.length > 0}
+                  aria-controls={commentMentionMatches.length ? commentMentionListboxId : undefined}
+                  aria-activedescendant={commentMentionMatches.length ? activeCommentMentionOptionId : undefined}
+                  aria-describedby={commentMentionMatches.length ? commentMentionStatusId : undefined}
+                  onChange={(event) => {
+                    setGlobalCommentDraft(event.target.value);
+                    setCommentMentionIndex(0);
+                  }}
+                  onKeyDown={(event) =>
+                    handleMentionKeyDown(
+                      event,
+                      commentMentionMatches,
+                      activeCommentMentionIndex,
+                      setCommentMentionIndex,
+                      setGlobalCommentDraft,
+                      globalCommentDraft
+                    )
+                  }
+                  required
+                />
+                <MentionAssistPanel
+                  matches={commentMentionMatches}
+                  activeIndex={activeCommentMentionIndex}
+                  setActiveIndex={setCommentMentionIndex}
+                  applyMention={applyMention}
+                  draft={globalCommentDraft}
+                  setDraft={setGlobalCommentDraft}
+                  preview={commentMentionPreview}
+                  removeMention={removeMention}
+                  statusId={commentMentionStatusId}
+                  listboxId={commentMentionListboxId}
+                  activeOptionId={activeCommentMentionOptionId}
+                  announcement={commentMentionAnnouncement}
+                  helpId="comment-mention-help"
+                  helpText=""
+                  listboxLabel="문서 댓글 멘션 후보"
+                  previewTitle="멘션 대상 미리보기"
+                />
+              </div>
+              <Button type="submit" size="sm" disabled={!globalCommentDraft.trim()}>등록</Button>
+            </form>
+          )}
+
+          <div className="space-y-2">
+            {globalComments.length ? (
+              globalComments.map((comment) => (
+                <div
+                  key={comment.id}
+                  className="group rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 transition-all duration-150 hover:border-[var(--border)]/60 hover:shadow-sm"
+                >
+                  <div className="mb-1.5 flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-strong)] text-xs font-semibold text-[var(--foreground)]">
+                        {(comment.userName || "?")[0].toUpperCase()}
+                      </span>
+                      <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
+                    </div>
+                    <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                      <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
+                      {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
+                        <>
+                          <button
+                            type="button"
+                            className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
+                            onClick={() => {
+                              setEditingCommentId(comment.id);
+                              setEditingCommentDraft(comment.content || "");
+                            }}
+                          >
+                            수정
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                            onClick={() => setDeleteCommentId(comment.id)}
+                          >
+                            삭제
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {editingCommentId === comment.id ? (
+                    <div className="space-y-2">
+                      <Input
+                        value={editingCommentDraft}
+                        onChange={(event) => setEditingCommentDraft(event.target.value)}
+                        placeholder="댓글 수정"
+                      />
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={async () => {
+                            const next = editingCommentDraft.trim();
+                            if (!next) return;
+                            await handleUpdateComment(comment.id, next);
+                            setEditingCommentId(null);
+                            setEditingCommentDraft("");
+                          }}
+                        >
+                          저장
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setEditingCommentId(null);
+                            setEditingCommentDraft("");
+                          }}
+                        >
+                          취소
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm leading-relaxed text-[var(--foreground)]">{comment.content}</p>
+                  )}
+
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {["👍", "🔥", "✅"].map((emoji) => {
+                      const targetId = `idea:${comment.id}`;
+                      const key = `comment:${targetId}`;
+                      const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
+                      const item = (summary.reactions || []).find((row) => row.emoji === emoji);
+                      const mine = (summary.mine || []).includes(emoji);
+                      return (
+                        <button
+                          key={`comment-reaction-${comment.id}-${emoji}`}
+                          type="button"
+                          disabled={isReadOnly}
+                          onClick={() => handleReaction(emoji, "comment", targetId)}
+                          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
+                            mine
+                              ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                              : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)]/40"
+                          }`}
+                        >
+                          {emoji} {item?.count || 0}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="py-4 text-center text-sm text-[var(--muted)]">아직 문서 댓글이 없습니다.</p>
+            )}
+          </div>
+        </div>
+      </DrawerShell>
+
+      <DrawerShell
+        open={blockCommentPanelOpen}
+        title="블록 댓글"
+        description={`블록 ID: ${blockCommentPanelBlockId}`}
+        onClose={() => {
+          setBlockCommentPanelOpen(false);
+          setBlockCommentDraft("");
+          setCommentFilterBlockId("");
+        }}
+        widthClass="max-w-md"
+      >
+        {!isReadOnly && (
+          <form
+            className="mb-4 flex flex-col gap-2"
+            onSubmit={async (event) => {
+              if (!blockCommentDraft.trim()) {
+                event.preventDefault();
+                return;
+              }
+              await handleCreateComment(event, blockCommentPanelBlockId, blockCommentDraft);
+              setBlockCommentDraft("");
+            }}
+          >
+            <Input
+              value={blockCommentDraft}
+              placeholder="이 블록에 댓글 입력..."
+              onChange={(event) => setBlockCommentDraft(event.target.value)}
+              aria-label="블록 댓글 입력"
+            />
+            <Button type="submit" size="sm" disabled={!blockCommentDraft.trim()}>등록</Button>
+          </form>
+        )}
+
+        <div className="space-y-2">
+          {blockComments.map((comment) => (
+              <div key={comment.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
+                  <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
+                </div>
+                <p className="text-sm text-[var(--foreground)]">{comment.content}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {["👍", "🔥", "✅"].map((emoji) => {
+                    const targetId = `idea:${comment.id}`;
+                    const key = `comment:${targetId}`;
+                    const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
+                    const item = (summary.reactions || []).find((row) => row.emoji === emoji);
+                    const mine = (summary.mine || []).includes(emoji);
+                    return (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => handleReaction(emoji, "comment", targetId)}
+                        disabled={isReadOnly}
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${mine ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]" : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)]/40"}`}
+                      >
+                        {emoji} {item?.count || 0}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          {blockComments.length === 0 && (
+            <p className="py-4 text-center text-sm text-[var(--muted)]">이 블록에 댓글이 없습니다.</p>
+          )}
+        </div>
+      </DrawerShell>
+
       {restoreTarget ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button type="button" className="absolute inset-0 bg-slate-950/40" onClick={() => setRestoreTarget(null)} aria-label="복원 다이얼로그 닫기" />
@@ -744,6 +898,25 @@ export function IdeaStudioPanel({
           </section>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={deleteCommentId !== null}
+        title="댓글 삭제"
+        description="이 댓글을 삭제할까요? 삭제 후 되돌릴 수 없습니다."
+        confirmText="삭제"
+        danger
+        onConfirm={async () => {
+          if (deleteCommentId !== null) {
+            await handleDeleteComment(deleteCommentId);
+            if (editingCommentId === deleteCommentId) {
+              setEditingCommentId(null);
+              setEditingCommentDraft("");
+            }
+          }
+          setDeleteCommentId(null);
+        }}
+        onCancel={() => setDeleteCommentId(null)}
+      />
     </Card>
   );
 }

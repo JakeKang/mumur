@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Idea, Comment } from "@/shared/types";
 import { STATUS_META as STATUS_META_DEFAULT } from "@/features/ideas/constants/idea-status";
 import { AlertCircle, Check, Loader2 } from "lucide-react";
@@ -41,9 +41,8 @@ function normalizeBlockType(rawType: string | undefined): BlockType {
   if (value === "heading") {
     return "heading2";
   }
-  if (value === "image") {
-    return "file";
-  }
+  if (value === "callout") return "callout";
+  if (value === "image") return "image";
   return "paragraph";
 }
 
@@ -69,6 +68,8 @@ const BLOCK_TYPE_OPTIONS: { type: BlockType; icon: string; label: string }[] = [
   { type: "checklist",    icon: "☑",  label: "체크리스트" },
   { type: "quote",        icon: "❝",  label: "인용" },
   { type: "code",         icon: "</>", label: "코드" },
+  { type: "callout",      icon: "💬", label: "콜아웃" },
+  { type: "image",        icon: "🖼️", label: "이미지" },
   { type: "divider",      icon: "—",  label: "구분선" },
   { type: "file",         icon: "📎", label: "파일" },
 ];
@@ -152,27 +153,40 @@ function BlockRow({
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const rowRef = useRef<HTMLElement>(null);
   const dragTriggeredRef = useRef(false);
+  const typeMenuRef = useRef<HTMLDivElement>(null);
+  const reactionPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!typeMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (typeMenuRef.current && !typeMenuRef.current.contains(e.target as Node)) {
+        setTypeMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [typeMenuOpen]);
+
+  useEffect(() => {
+    if (!reactionPickerOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (reactionPickerRef.current && !reactionPickerRef.current.contains(e.target as Node)) {
+        setReactionPickerOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [reactionPickerOpen]);
 
   return (
     <section
       ref={rowRef}
       role="presentation"
       data-block-index={index}
-      className={`group/row relative flex items-start gap-1 py-0.5 ${isDragOver ? "border-t-2 border-[var(--accent)]" : ""} ${isSelected ? "rounded-md bg-[var(--accent)]/10" : ""}`}
+      className={`group/row relative flex items-start gap-1 py-px rounded-md transition-colors duration-100 ${isDragOver ? "border-t-2 border-[var(--accent)]" : ""} ${isSelected ? "rounded-md bg-[var(--accent)]/10" : ""}`}
     >
-      <div className="relative flex shrink-0 flex-col items-center gap-0.5 pt-1 md:invisible md:group-hover/row:visible">
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleSelect(event.shiftKey);
-          }}
-          aria-label="블록 선택"
-          title="Shift+클릭으로 범위 선택"
-          className={`h-4 w-4 rounded border text-[10px] leading-none transition ${isSelected ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:border-[var(--accent)]/60"}`}
-        >
-          {isSelected ? "✓" : ""}
-        </button>
+      <div className="relative flex shrink-0 flex-col items-center gap-0 md:invisible md:group-hover/row:visible">
+        <div className="relative" ref={typeMenuRef}>
         <button
           type="button"
           draggable={!readOnly}
@@ -190,18 +204,22 @@ function BlockRow({
               dragTriggeredRef.current = false;
             }, 0);
           }}
-          onClick={() => {
+          onClick={(event) => {
             if (readOnly) {
               return;
             }
             if (dragTriggeredRef.current) {
               return;
             }
+            event.stopPropagation();
+            onToggleSelect(event.shiftKey);
             setTypeMenuOpen((v) => !v);
           }}
           aria-label="블록 이동 및 타입 변경"
           title="드래그: 이동 · 클릭: 타입 변경"
-          className={`rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)] ${readOnly ? "cursor-not-allowed opacity-50" : "cursor-grab active:cursor-grabbing"}`}
+          className={`rounded p-1 text-sm hover:bg-[var(--surface-strong)] transition-all ${
+            readOnly ? "cursor-not-allowed opacity-40 text-[var(--muted)]" : "cursor-grab active:cursor-grabbing"
+          } ${isSelected ? "text-[var(--accent)] bg-[var(--accent)]/10" : "text-[var(--muted)]"}`}
           disabled={readOnly}
         >
           ⠿
@@ -234,6 +252,7 @@ function BlockRow({
             </button>
           </div>
         )}
+        </div>
       </div>
 
       <div className="min-w-0 flex-1">
@@ -243,35 +262,58 @@ function BlockRow({
           autoFocus={isEditing}
           onFocus={onFocus}
           onChange={onChange}
+          onTypeChange={onTypeChange}
           onFileUpload={onFileUpload}
           onEnter={onEnter}
           onDelete={onDelete}
         />
 
-        {blockReactions.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-1">
-            {blockReactions.map((r) => (
+        {(blockReactions.length > 0 || commentCount > 0) && (
+          <div className="mt-1 flex items-center justify-between gap-1">
+            <div className="flex flex-wrap gap-1">
+              {blockReactions.map((r) => (
+                <button
+                  key={r.emoji}
+                  type="button"
+                  onClick={() => onReaction(r.emoji)}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${r.mine ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]" : "border-[var(--border)] hover:border-[var(--accent)]/50 text-[var(--muted)]"}`}
+                >
+                  {r.emoji} {r.count}
+                </button>
+              ))}
+            </div>
+            {commentCount > 0 && (
               <button
-                key={r.emoji}
                 type="button"
-                onClick={() => onReaction(r.emoji)}
-                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${r.mine ? "border-[var(--accent)] bg-[var(--accent)]/10" : "border-[var(--border)] hover:border-[var(--accent)]/50"}`}
+                onClick={onOpenComments}
+                title={`댓글 ${commentCount}개 — 클릭하여 확인`}
+                aria-label={`댓글 ${commentCount}개`}
+                className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-1.5 py-0.5 text-xs text-[var(--muted)] hover:border-[var(--accent)]/50 transition"
               >
-                {r.emoji} {r.count}
+                💬 {commentCount}
               </button>
-            ))}
+            )}
           </div>
         )}
       </div>
 
       <div className="ml-1 flex shrink-0 items-start gap-1 pt-1 md:invisible md:group-hover/row:visible">
-        <div className="relative">
+        <button
+          type="button"
+          onClick={onOpenComments}
+          title="블록 댓글 보기/추가"
+          aria-label="블록 댓글"
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-xs text-[var(--muted)] transition hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
+        >
+          💬
+        </button>
+        <div className="relative" ref={reactionPickerRef}>
           <button
             type="button"
             onClick={() => setReactionPickerOpen((v) => !v)}
             title="리액션 추가"
             aria-label="리액션 추가"
-            className="rounded p-0.5 text-xs text-[var(--muted)] hover:bg-[var(--surface-strong)]"
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-xs text-[var(--muted)] transition hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
           >
             😊
           </button>
@@ -291,17 +333,6 @@ function BlockRow({
           )}
         </div>
 
-        {commentCount > 0 && (
-          <button
-            type="button"
-            onClick={onOpenComments}
-            title={`댓글 ${commentCount}개`}
-            aria-label={`댓글 ${commentCount}개`}
-            className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-1.5 py-0.5 text-xs text-[var(--muted)] hover:border-[var(--accent)]/50 transition"
-          >
-            💬 {commentCount}
-          </button>
-        )}
       </div>
     </section>
   );
@@ -352,7 +383,7 @@ export function BlockEditor({
     await Promise.all([onSaveBlocks(blocks), onSaveTitle(title)]);
   }, [blocks, title, onSaveBlocks, onSaveTitle]);
 
-  const { status, flush, markDirty } = useAutoSave(saveAll, 800);
+  const { status, flush, markDirty } = useAutoSave(saveAll, 2000);
 
   const updateTitle = useCallback(
     (val: string) => { setTitle(val); markDirty(); },
@@ -542,8 +573,23 @@ export function BlockEditor({
     [markDirty, readOnly, selectedBlockIds, selectedCount]
   );
 
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const container = document.querySelector("[data-block-editor]");
+      if (container && !container.contains(e.target as Node)) {
+        setSelectedBlockIds([]);
+        setSelectionAnchor(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
   return (
-    <div className="flex h-full flex-col">
+    <div
+      className="flex h-full flex-col"
+      data-block-editor
+    >
       <SaveStatusBadge status={status} onRetry={flush} />
 
       {readOnly && (
@@ -626,7 +672,15 @@ export function BlockEditor({
             }}
             onToggleSelect={(shiftKey) => toggleBlockSelection(index, shiftKey)}
             onChange={(content, type, options) => handleChange(index, content, type, options)}
-            onEnter={() => addBlock(index)}
+            onEnter={() => {
+              const LIST_CONTINUE: BlockType[] = ["bulletList", "numberedList", "checklist"];
+              if (LIST_CONTINUE.includes(block.type) && block.content.trim() === "") {
+                addBlock(index, "paragraph");
+                handleTypeChange(index, "paragraph");
+              } else {
+                addBlock(index, LIST_CONTINUE.includes(block.type) ? block.type : "paragraph");
+              }
+            }}
             onDelete={() => handleDelete(index)}
             onTypeChange={(type) => handleTypeChange(index, type)}
             onDragStart={() => setDragIndex(index)}
@@ -655,7 +709,7 @@ export function BlockEditor({
         {!readOnly ? (
           <button
             type="button"
-            className="min-h-[60px] cursor-text py-2"
+            className="group/addblock w-full min-h-[40px] cursor-text py-3 text-left"
             onClick={() => {
               const last = blocks.length - 1;
               if (blocks[last]?.content === "" && blocks[last]?.type === "paragraph") {
@@ -665,7 +719,11 @@ export function BlockEditor({
               }
             }}
             aria-label="새 블록 추가"
-          />
+          >
+            <span className="text-sm text-transparent transition-colors group-hover/addblock:text-[var(--muted)] select-none">
+              클릭하여 새 블록 추가...
+            </span>
+          </button>
         ) : null}
       </section>
     </div>
