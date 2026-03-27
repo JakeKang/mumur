@@ -46,17 +46,22 @@ export function DialogShell({
         onClick={onClose}
         aria-label="닫기"
       />
-      <div className={`relative w-full ${maxWidthClass} rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl`}>
-        <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
+      <div className={`relative w-full ${maxWidthClass} rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl transition-all duration-150`}>
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-2.5">
           <div>
-            <p className="text-base font-semibold text-[var(--foreground)]">{title}</p>
-            {description ? <p className="mt-1 text-xs text-[var(--muted)]">{description}</p> : null}
+            <p className="text-sm font-semibold text-[var(--foreground)]">{title}</p>
+            {description ? <p className="mt-0.5 text-xs text-[var(--muted)]">{description}</p> : null}
           </div>
-          <Button type="button" size="sm" variant="outline" onClick={onClose}>
-            닫기
-          </Button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="닫기"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--muted)] transition hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
+          >
+            ✕
+          </button>
         </div>
-        <div className="max-h-[70vh] overflow-auto px-4 py-4">{children}</div>
+        <div className="max-h-[70vh] overflow-auto px-4 py-3">{children}</div>
         {footer ? <div className="border-t border-[var(--border)] px-4 py-3">{footer}</div> : null}
       </div>
     </div>

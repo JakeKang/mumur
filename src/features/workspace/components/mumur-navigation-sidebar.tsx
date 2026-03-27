@@ -7,6 +7,7 @@ import { Button } from "@/shared/components/ui/button";
 import { Input } from "@/shared/components/ui/input";
 import { DialogShell } from "@/shared/components/ui/dialog-shell";
 import { ConfirmDialog } from "@/shared/components/ui/confirm-dialog";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 const ICON_PRESETS = ["📁", "🗂️", "💡", "🚀", "🎯", "⚡", "🔥", "🌱", "🏠", "✨"];
 const COLOR_PRESETS = [
@@ -17,11 +18,6 @@ const COLOR_PRESETS = [
   { hex: "#ef4444", label: "레드" },
   { hex: "#8b5cf6", label: "바이올렛" },
 ];
-
-function profileInitial(name: string) {
-  const value = String(name || "M").trim();
-  return value ? value[0].toUpperCase() : "M";
-}
 
 type TooltipButtonProps = {
   label: string;
@@ -40,8 +36,8 @@ function TooltipButton({ label, showTooltip, children, onClick, active, classNam
         onClick={onClick}
         aria-label={label}
         title={label}
-        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${
-          active ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]" : "text-[var(--muted)] hover:bg-[var(--surface)]"
+        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-all duration-150 ${
+          active ? "bg-[var(--accent)]/10 font-semibold text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
         } ${className}`}
       >
         {children}
@@ -72,30 +68,39 @@ type MumurNavigationSidebarProps = {
   userWorkspaces: UserWorkspace[];
   activeWorkspaceId: number | null;
   onSwitchWorkspace: (id: number) => void;
+  onEnterWorkspace?: (id: number) => void;
+  selectedWorkspaceId?: number | null;
   onCreateWorkspace: (data: { name: string; icon: string; color: string }) => Promise<void>;
   onUpdateWorkspace: (id: number, data: { name: string; icon: string; color: string }) => Promise<void>;
   onDeleteWorkspace: (id: number) => Promise<void>;
   switchingWorkspace?: boolean;
+  onToggleCollapse: () => void;
+  onLogout: () => void;
+  onEditProfile?: () => void;
 };
 
 export function MumurNavigationSidebar({
   activePage,
   onNavigate,
   collapsed,
-  userName,
-  workspaceName,
+  userName: _userName,
+  workspaceName: _workspaceName,
   userWorkspaces,
   activeWorkspaceId,
   onSwitchWorkspace,
+  onEnterWorkspace,
+  selectedWorkspaceId = null,
   onCreateWorkspace,
   onUpdateWorkspace,
   onDeleteWorkspace,
   switchingWorkspace = false,
+  onToggleCollapse,
+  onLogout: _onLogout,
+  onEditProfile: _onEditProfile,
 }: MumurNavigationSidebarProps) {
   const [wsDialog, setWsDialog] = useState<WorkspaceDialogState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UserWorkspace | null>(null);
   const [busy, setBusy] = useState(false);
-
   const navItems = [
     { id: "dashboard", icon: "🏠", label: "대시보드" },
     { id: "ideas",     icon: "💡", label: "전체 아이디어" },
@@ -196,19 +201,22 @@ export function MumurNavigationSidebar({
 
             <div className="space-y-0.5">
               {userWorkspaces.map((ws) => {
-                const isActive = ws.id === activeWorkspaceId;
+                const isActive = activePage === "workspace" && ws.id === selectedWorkspaceId;
                 return (
                   <div key={ws.id} className="group/ws relative flex items-center">
+                    {isActive && (
+                      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r bg-[var(--accent)]" />
+                    )}
                     <button
                       type="button"
-                      onClick={() => onSwitchWorkspace(ws.id)}
+                      onClick={() => (onEnterWorkspace || onSwitchWorkspace)(ws.id)}
                       disabled={switchingWorkspace}
                       title={ws.name}
                       aria-label={ws.name}
-                      className={`flex flex-1 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${
+                      className={`flex flex-1 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-all duration-150 ${
                         isActive
-                          ? "bg-[var(--surface)] font-semibold text-[var(--foreground)]"
-                          : "text-[var(--muted)] hover:bg-[var(--surface)]"
+                          ? "bg-[var(--accent)]/10 font-semibold text-[var(--accent)]"
+                          : "text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
                       } ${collapsed ? "justify-center" : "justify-start"} ${switchingWorkspace ? "opacity-70 cursor-wait" : ""}`}
                     >
                       <span
@@ -270,16 +278,16 @@ export function MumurNavigationSidebar({
           </div>
         </div>
 
-        <div className={`flex items-center gap-2 border-t border-[var(--border)] px-4 py-3 ${collapsed ? "justify-center px-2" : ""}`}>
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--foreground)] text-xs font-semibold text-[var(--surface)]">
-            {profileInitial(userName)}
-          </div>
-          {!collapsed && (
-            <div className="min-w-0">
-              <p className="truncate text-xs font-semibold text-[var(--foreground)]">{userName || "Mumur 사용자"}</p>
-              <p className="truncate text-[11px] text-[var(--muted)]">{workspaceName || "워크스페이스"}</p>
-            </div>
-          )}
+        <div className="flex items-center justify-center border-t border-[var(--border)] py-2">
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
+            aria-label={collapsed ? "사이드바 펼치기" : "사이드바 접기"}
+            title={collapsed ? "사이드바 펼치기" : "사이드바 접기"}
+          >
+            {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
         </div>
       </aside>
 

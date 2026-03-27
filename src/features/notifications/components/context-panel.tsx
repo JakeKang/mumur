@@ -47,6 +47,7 @@ export function ContextPanel({
   saveMutedTypes,
   notifications,
   markNotificationRead,
+  deleteNotification,
   formatTime
 }) {
   const [notificationSort, setNotificationSort] = useState("recent");
@@ -246,19 +247,48 @@ export function ContextPanel({
             <CardContent className="grid gap-2 pt-2">
               {sortedNotifications.length ? (
                 sortedNotifications.map((item) => (
-                  <button
-                    type="button"
+                  <div
                     key={item.id}
-                    className={`rounded-md border p-2 text-left ${item.read ? "border-[var(--border)] bg-[var(--surface)]" : "border-[var(--border)] bg-[var(--surface-strong)]"} ${item.type === "mention.created" ? "ring-1 ring-amber-200" : ""}`}
-                    onClick={() => markNotificationRead(item.id)}
+                    className={`group/notif relative rounded-md border p-2 ${item.read ? "border-[var(--border)] bg-[var(--surface)]" : "border-[var(--accent)]/20 bg-[var(--surface-strong)]"} ${item.type === "mention.created" ? "ring-1 ring-amber-200" : ""}`}
                   >
-                    <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                      <span className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">{notificationTypeLabel(item.type)}</span>
-                      <PriorityBadge level={notificationPriorityLevel(item)} />
+                    {!item.read && (
+                      <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                    )}
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      onClick={() => markNotificationRead(item.id)}
+                    >
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                        <span className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">{notificationTypeLabel(item.type)}</span>
+                        <PriorityBadge level={notificationPriorityLevel(item)} />
+                      </div>
+                      <p className="text-sm font-medium text-[var(--foreground)]">{item.message}</p>
+                      <p className="text-xs text-[var(--muted)]">{formatTime(item.createdAt)}</p>
+                    </button>
+                    <div className="mt-1.5 flex gap-1 opacity-0 transition-opacity group-hover/notif:opacity-100">
+                      {!item.read && (
+                        <button
+                          type="button"
+                          onClick={() => markNotificationRead(item.id)}
+                          className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
+                          title="읽음 처리"
+                        >
+                          ✓ 읽음
+                        </button>
+                      )}
+                      {deleteNotification && (
+                        <button
+                          type="button"
+                          onClick={() => deleteNotification(item.id)}
+                          className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                          title="삭제"
+                        >
+                          × 삭제
+                        </button>
+                      )}
                     </div>
-                    <p className="text-sm font-medium text-[var(--foreground)]">{item.message}</p>
-                    <p className="text-xs text-[var(--muted)]">{formatTime(item.createdAt)}</p>
-                  </button>
+                  </div>
                 ))
               ) : (
                 <p className="text-sm text-[var(--muted)]">알림이 없습니다.</p>

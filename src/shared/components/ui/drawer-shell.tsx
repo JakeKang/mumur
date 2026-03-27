@@ -44,7 +44,7 @@ export function DrawerShell({
         onClick={onClose}
         aria-label="서랍 닫기"
       />
-      <aside className={`absolute right-0 top-0 h-full w-full ${widthClass} overflow-auto border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl`}>
+      <aside className={`absolute right-0 top-0 h-full w-full ${widthClass} overflow-auto border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl transition-transform duration-200`}>
         <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 py-3">
           <div>
             <p className="text-base font-semibold text-[var(--foreground)]">{title}</p>
