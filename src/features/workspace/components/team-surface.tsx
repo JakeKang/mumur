@@ -6,24 +6,24 @@ import { Input } from "@/shared/components/ui/input";
 import { invitationStatusLabel, roleLabel } from "@/shared/constants/ui-labels";
 import { useWorkbenchSessionContext } from "@/modules/workbench/presentation/contexts/workbench-contexts";
 import type React from "react";
-import type { Dispatch, SetStateAction } from "react";
+import type { ComponentProps, Dispatch, SetStateAction } from "react";
 import type { Webhook, WebhookForm, WorkspaceInvitation, WorkspaceMember, WorkspaceMemberForm, WorkspaceRole } from "@/shared/types";
 
 type TeamSurfaceProps = {
   teamMembers: WorkspaceMember[];
   teamMemberForm: WorkspaceMemberForm;
   setTeamMemberForm: Dispatch<SetStateAction<WorkspaceMemberForm>>;
-  addTeamMember: (event: React.FormEvent<HTMLFormElement>) => void | Promise<void>;
+  addTeamMember: (event: Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0]) => void | Promise<void>;
   updateTeamMemberRole: (userId: number, role: WorkspaceRole) => void | Promise<void>;
   requestRemoveTeamMember: (member: WorkspaceMember) => void;
   teamInvitations: WorkspaceInvitation[];
   retryTeamInvitation: (invitationId: number) => void | Promise<void>;
   requestCancelInvitation: (invite: WorkspaceInvitation) => void;
-  teamInvitationMessage: string;
+  teamInvitationFeedback: string;
   webhooks: Webhook[];
   webhookForm: WebhookForm;
   setWebhookForm: Dispatch<SetStateAction<WebhookForm>>;
-  handleSaveWebhook: (event: React.FormEvent<HTMLFormElement>) => void | Promise<void>;
+  handleSaveWebhook: (event: Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0]) => void | Promise<void>;
   webhookSaving: boolean;
 };
 
@@ -47,7 +47,7 @@ export function TeamSurface({
   teamInvitations,
   retryTeamInvitation,
   requestCancelInvitation,
-  teamInvitationMessage,
+  teamInvitationFeedback,
   webhooks,
   webhookForm,
   setWebhookForm,
@@ -98,8 +98,8 @@ export function TeamSurface({
             <p className="text-sm text-[var(--muted)]">현재 권한에서는 멤버 초대/역할 변경을 할 수 없습니다. 관리자 또는 소유자 권한이 필요합니다.</p>
           )}
 
-          {teamInvitationMessage ? (
-            <div className="rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-xs text-[var(--muted)]">{teamInvitationMessage}</div>
+          {teamInvitationFeedback ? (
+            <div className="rounded-md border border-emerald-200/70 bg-emerald-50/80 px-3 py-2 text-xs text-emerald-700">{teamInvitationFeedback}</div>
           ) : null}
 
           <div className="space-y-2">
@@ -109,7 +109,7 @@ export function TeamSurface({
                 <div key={`team-invite-${invite.id}`} className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2">
                   <p className="text-xs font-semibold text-[var(--foreground)]">{invite.email}</p>
                   <p className="text-xs text-[var(--muted)]">{`역할 ${roleLabel(invite.role)} · ${invitationStatusLabel(invite.status)}`}</p>
-                  <p className="text-xs text-[var(--muted)]">{invite.message || "-"}</p>
+                  <p className="text-xs text-[var(--muted)]">{invite.message || (invite.status === "pending" ? "수락 전까지 대기 중입니다." : invite.status === "accepted" ? "초대가 수락됐습니다." : "초대가 취소됐습니다.")}</p>
                   <p className="text-[11px] text-[var(--muted)]">{`초대자 ${invite.invitedByName || "소유자"} · ${formatTime(invite.updatedAt)}`}</p>
                   {canManageMembers && invite.status === "pending" ? (
                     <div className="mt-1 flex items-center gap-2">
