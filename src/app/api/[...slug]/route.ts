@@ -1,19 +1,55 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { ensureDir } from "@/shared/lib/server/db";
 import { getDatabaseClient, getQueryAdapter } from "@/shared/lib/server/database-client";
+import { RequestValidationError, enforceMutationRateLimit, ensureMutationOrigin, readJsonBody } from "@/shared/lib/server/api-request-security";
+import { reportServerIssue } from "@/shared/lib/observability";
 import {
-  SESSION_COOKIE,
-  clearExpiredSessions,
+  inferUploadedBlockType,
+  normalizeWorkspaceViewConfig,
+  parseStoredDraftPayload,
+  parseStoredIdeaBlocks,
+  parseStoredJsonObject,
+  parseStoredMutedTypes,
+  resolveUploadedMimeType,
+  restoreIdeaVersionSnapshot,
+  uploadDestination,
+  validateUploadedBlockFile,
+} from "@/shared/lib/server/api-route-seams";
+import {
   createSession,
   hashPassword,
+  isPasswordPolicyValid,
+  MIN_PASSWORD_LENGTH,
   normalizeText,
-  parseCookieHeader,
+  passwordPolicyMessage,
   verifyPassword
 } from "@/shared/lib/server/auth";
-import { IDEA_STATUS } from "@/features/ideas/constants/idea-status";
-import { notificationTypeLabel } from "@/shared/constants/ui-labels";
+import {
+  authContext,
+  clearAuthRateLimit,
+  clearSessionCookie,
+  getAuthRateLimitStatus,
+  getSessionToken,
+  registerAuthRateLimitFailure,
+  withSessionCookie
+} from "@/shared/lib/server/api-session";
+import { IDEA_STATUS, STATUS_META } from "@/features/ideas/constants/idea-status";
+import { shouldCreateAutoCheckpoint, toIdeaCollabCheckpoint } from "@/features/ideas/collab/idea-collab-checkpoint";
+import { categoryLabel, notificationTypeLabel, priorityLabel } from "@/shared/constants/ui-labels";
+import { broadcastWorkbenchSocketEvent } from "@/shared/lib/server/workbench-ws-hub";
+import {
+  IDEA_PRESENCE_TTL_MS,
+  broadcastTeamStreamEvent,
+  clearIdeaPresence,
+  clearIdeaPresenceForIdea,
+  getTeamStreamClients,
+  listIdeaPresence,
+  removeTeamStreamClient,
+  shouldThrottleIdeaPresence,
+  upsertIdeaPresence
+} from "@/shared/lib/server/workbench-presence-stream";
+import { enqueueWebhookDeliveries, isValidWebhookUrl, maskWebhookUrl, processWebhookQueue } from "@/shared/lib/server/webhook-queue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,24 +57,21 @@ export const dynamic = "force-dynamic";
 const db = getDatabaseClient();
 const queries = getQueryAdapter();
 
-const BLOCK_TYPES = ["paragraph", "heading1", "heading2", "heading3", "bulletList", "numberedList", "checklist", "quote", "code", "divider", "file", "callout", "image"];
+const BLOCK_TYPES = ["paragraph", "heading1", "heading2", "heading3", "bulletList", "numberedList", "checklist", "quote", "code", "divider", "file", "callout", "image", "video"];
 const WEBHOOK_PLATFORMS = ["slack", "discord"];
 const TEAM_ROLES = ["viewer", "editor", "deleter", "admin", "owner", "member"];
-const encoder = new TextEncoder();
-
-type StreamClient = { controller: ReadableStreamDefaultController; userId: number };
 const globalRef = globalThis;
-if (!globalRef.__mumurStreamClients) {
-  globalRef.__mumurStreamClients = new Map<number, Map<string, StreamClient>>();
-}
 if (!globalRef.__mumurWebhookWorker) {
   globalRef.__mumurWebhookWorker = null;
 }
 
-const streamClients: Map<number, Map<string, StreamClient>> = globalRef.__mumurStreamClients;
-
 function json(data, status = 200) {
   return NextResponse.json(data, { status });
+}
+
+function isUniqueConstraintError(error: unknown) {
+  const message = String((error as { message?: string })?.message || "").toLowerCase();
+  return message.includes("unique") || message.includes("duplicate key");
 }
 
 function toIdeaPayload(row) {
@@ -50,7 +83,7 @@ function toIdeaPayload(row) {
     category: row.category,
     status: row.status,
     priority: row.priority || "low",
-    blocks: JSON.parse(row.blocks_json || "[]"),
+    blocks: parseStoredIdeaBlocks(row.blocks_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -109,44 +142,136 @@ function getIdeaForTeam(ideaId, teamId) {
 }
 
 function ideaBlockIds(ideaRow) {
-  const blocks = JSON.parse(ideaRow.blocks_json || "[]");
+  const blocks = parseStoredIdeaBlocks(ideaRow.blocks_json);
   return new Set(blocks.map((block) => String(block.id || "")).filter(Boolean));
+}
+
+function formatIdeaTitle(title) {
+  return normalizeText(title) || "(제목 없음)";
+}
+
+function ideaStatusLabel(status) {
+  return STATUS_META[String(status || "")]?.label || "상태";
+}
+
+function summarizeIdeaUpdate(payload) {
+  const data = payload || {};
+  const title = formatIdeaTitle(data.title);
+  const changedFields = Array.isArray(data.changedFields) ? data.changedFields.map((field) => String(field)) : [];
+
+    if (changedFields.length === 1) {
+      const [field] = changedFields;
+      if (field === "status") {
+        const previous = data.previousStatus ? ideaStatusLabel(data.previousStatus) : null;
+        const next = ideaStatusLabel(data.status);
+        return previous ? `아이디어 상태가 ${previous}에서 ${next} 단계로 변경됐어요 · ${title}` : `아이디어 상태가 ${next} 단계로 변경됐어요 · ${title}`;
+      }
+      if (field === "title") {
+        return `아이디어 제목이 변경됐어요 · ${title}`;
+      }
+      if (field === "category") {
+        const next = categoryLabel(String(data.category || ""));
+        return `아이디어 분류가 ${next} 카테고리로 변경됐어요 · ${title}`;
+      }
+      if (field === "priority") {
+        const next = priorityLabel(String(data.priority || ""));
+        return `아이디어 우선순위가 ${next} 수준으로 변경됐어요 · ${title}`;
+      }
+    }
+
+  if (changedFields.length > 1) {
+    return `아이디어 정보가 업데이트됐어요 · ${title}`;
+  }
+
+  return `아이디어가 수정됐어요 · ${title}`;
+}
+
+function getIdeaUpdateEventPayload(previousIdea, nextIdea) {
+  const changedFields = [];
+  if (previousIdea.title !== nextIdea.title) {
+    changedFields.push("title");
+  }
+  if (previousIdea.category !== nextIdea.category) {
+    changedFields.push("category");
+  }
+  if (previousIdea.status !== nextIdea.status) {
+    changedFields.push("status");
+  }
+  if (String(previousIdea.priority || "low") !== String(nextIdea.priority || "low")) {
+    changedFields.push("priority");
+  }
+
+  if (!changedFields.length) {
+    return null;
+  }
+
+  return {
+    title: nextIdea.title,
+    status: nextIdea.status,
+    category: nextIdea.category,
+    priority: nextIdea.priority,
+    previousTitle: previousIdea.title,
+    previousStatus: previousIdea.status,
+    previousCategory: previousIdea.category,
+    previousPriority: String(previousIdea.priority || "low"),
+    changedFields
+  };
 }
 
 function formatNotificationMessage(eventType, payload) {
   const data = payload || {};
   switch (eventType) {
     case "idea.created":
-      return `새 아이디어 등록: ${data.title || "(제목 없음)"}`;
+      return `새 아이디어가 등록됐어요 · ${formatIdeaTitle(data.title)}`;
     case "idea.updated":
-      return `아이디어 업데이트: ${data.title || "(제목 없음)"}`;
+      return summarizeIdeaUpdate(data);
     case "idea.deleted":
-      return `아이디어 삭제: ${data.title || "(제목 없음)"}`;
+      return `아이디어가 삭제됐어요 · ${formatIdeaTitle(data.title)}`;
     case "comment.created":
-      return data.blockId ? `인라인 코멘트 등록 (${data.blockId})` : "새 댓글 등록";
+      return data.blockId ? `문서 블록에 새 댓글이 달렸어요` : "새 댓글이 달렸어요";
     case "reaction.added":
-      return `리액션 추가 ${data.emoji || ""}`;
+      return `리액션이 추가됐어요 ${data.emoji || ""}`.trim();
     case "reaction.removed":
-      return `리액션 제거 ${data.emoji || ""}`;
+      return `리액션이 제거됐어요 ${data.emoji || ""}`.trim();
     case "version.created":
-      return `기획서 버전 등록: ${data.versionLabel || "새 버전"}`;
+      return `새 버전이 등록됐어요 · ${data.versionLabel || "새 버전"}`;
     case "version.restored":
-      return `타임라인 복원: ${data.sourceVersionLabel || data.versionLabel || data.from || "스냅샷"}`;
+      return `버전으로 복원했어요 · ${data.sourceVersionLabel || data.versionLabel || data.from || "스냅샷"}`;
     case "mention.created":
-      return data.targetName
-        ? `${data.actorName || "누군가"}님이 ${data.targetName}님을 멘션했습니다`
-        : `${data.actorName || "누군가"}님이 나를 멘션했습니다`;
+      return `${data.actorName || "누군가"}님이 회원님을 멘션했어요`;
     case "integration.webhook.updated":
-      return `웹훅 설정 업데이트 (${data.platform || "플랫폼"})`;
+      return `웹훅 설정이 업데이트됐어요 · ${data.platform || "플랫폼"}`;
+    case "team.invitation.pending":
+      return `${data.email || "사용자"}님에게 팀 초대를 보냈어요`;
+    case "team.invitation.accepted":
+      return `${data.email || "사용자"}님이 팀 초대를 수락했어요`;
+    case "team.invitation.cancelled":
+      return `${data.email || "사용자"}님 초대를 취소했어요`;
     default:
       return notificationTypeLabel(eventType);
   }
 }
 
+function normalizeMentionNameToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}._-]+/gu, "");
+}
+
+function mentionTokenForMember(name, email) {
+  const displayNameToken = normalizeMentionNameToken(name);
+  if (displayNameToken) {
+    return displayNameToken;
+  }
+  return normalizeMentionNameToken(String(email || "").split("@")[0]);
+}
+
 function extractMentionTokens(content) {
   const text = normalizeText(content || "");
-  const matches = text.match(/@([A-Za-z0-9._%+-]+(?:@[A-Za-z0-9.-]+\.[A-Za-z]{2,})?)/g) || [];
-  return [...new Set(matches.map((item) => item.slice(1).toLowerCase()))];
+  const matches = text.matchAll(/(^|[\s([{])@([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|[\p{L}\p{N}][\p{L}\p{N}._-]{0,62})(?=$|[\s),.!?:;\]}])/gu);
+  return [...new Set(Array.from(matches, (match) => String(match[2] || "").toLowerCase()))];
 }
 
 function resolveMentionTargets(teamId, tokens) {
@@ -164,8 +289,9 @@ function resolveMentionTargets(teamId, tokens) {
 
   return members.filter((member) => {
     const emailToken = String(member.email || "").toLowerCase();
-    const nameToken = normalizeText(member.name || "").replace(/\s+/g, "").toLowerCase();
-    return tokens.includes(emailToken) || (nameToken && tokens.includes(nameToken));
+    const nameToken = mentionTokenForMember(member.name, member.email);
+    const legacyNameToken = normalizeText(member.name || "").replace(/\s+/g, "").toLowerCase();
+    return tokens.includes(emailToken) || (nameToken && tokens.includes(nameToken)) || (legacyNameToken && tokens.includes(legacyNameToken));
   });
 }
 
@@ -210,28 +336,25 @@ function getMutedTypesForUser(userId) {
     return [];
   }
 
-  try {
-    const parsed = JSON.parse(row.muted_types_json || "[]");
-    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch (error) {
-    void error;
-    return [];
-  }
+  return parseStoredMutedTypes(row.muted_types_json);
 }
 
 function isMutedForUser(userId, eventType) {
   return getMutedTypesForUser(userId).includes(eventType);
 }
 
-function teamStreamSet(teamId) {
-  if (!streamClients.has(teamId)) {
-    streamClients.set(teamId, new Map());
-  }
-  return streamClients.get(teamId);
+function broadcastIdeaRefresh(teamId, ideaId, userId, reason = "idea.updated") {
+  broadcastTeamStreamEvent(teamId, "idea.refresh", {
+    teamId,
+    ideaId,
+    actorUserId: userId,
+    reason,
+    updatedAt: Date.now()
+  });
 }
 
 function broadcastTeamNotification(teamId, notification) {
-  const clients = streamClients.get(teamId);
+  const clients = getTeamStreamClients(teamId);
   if (!clients || !clients.size) {
     return;
   }
@@ -245,15 +368,22 @@ function broadcastTeamNotification(teamId, notification) {
       return;
     }
     try {
-      client.controller.enqueue(encoder.encode(line));
-    } catch (error) {
-      void error;
+      client.controller.enqueue(new TextEncoder().encode(line));
+    } catch {
+      // client disconnected — expected during SSE teardown
     }
   });
+
+  broadcastWorkbenchSocketEvent(
+    teamId,
+    "notification",
+    notification,
+    (client) => isNotificationVisibleToUser(client.userId, notification.type, notification.payload) && !isMutedForUser(client.userId, notification.type)
+  );
 }
 
 function toNotificationPayload(row) {
-  const payload = JSON.parse(row.payload_json || "{}");
+  const payload = parseStoredJsonObject(row.payload_json);
   return {
     id: row.id,
     teamId: row.team_id,
@@ -266,126 +396,6 @@ function toNotificationPayload(row) {
     message: formatNotificationMessage(row.event_type, payload),
     read: Boolean(row.read_at)
   };
-}
-
-function isValidWebhookUrl(platform, value) {
-  try {
-    const url = new URL(String(value || ""));
-    if (url.protocol !== "https:") {
-      return false;
-    }
-    if (platform === "slack") {
-      return url.hostname.includes("slack.com");
-    }
-    if (platform === "discord") {
-      return url.hostname.includes("discord.com") || url.hostname.includes("discordapp.com");
-    }
-    return false;
-  } catch (error) {
-    void error;
-    return false;
-  }
-}
-
-function formatWebhookMessage(notification) {
-  const message = notification.message || notification.type;
-  const actor = notification.actor || "시스템";
-  return `[Mumur] ${message} | actor: ${actor}`;
-}
-
-async function postWebhook(webhook, notification) {
-  const payload = webhook.platform === "slack" ? { text: formatWebhookMessage(notification) } : { content: formatWebhookMessage(notification) };
-  const response = await fetch(webhook.webhook_url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error(`웹훅 요청 실패: ${response.status}`);
-  }
-}
-
-async function processWebhookQueue() {
-  const now = Date.now();
-  const deliveries = db
-    .prepare(
-      `SELECT wd.*, tw.platform, tw.webhook_url, e.event_type, e.payload_json, e.user_id
-       FROM webhook_deliveries wd
-       JOIN workspace_webhooks tw ON tw.id = wd.webhook_id
-       JOIN events e ON e.id = wd.event_id
-       WHERE wd.status IN ('pending', 'retry') AND wd.next_attempt_at <= ? AND tw.enabled = 1
-       ORDER BY wd.next_attempt_at ASC
-       LIMIT 30`
-    )
-    .all(now);
-
-  for (const delivery of deliveries) {
-    const payload = JSON.parse(delivery.payload_json || "{}");
-    const actorRow = delivery.user_id ? db.prepare("SELECT name FROM users WHERE id = ?").get(delivery.user_id) : null;
-    const notification = {
-      type: delivery.event_type,
-      payload,
-      actor: actorRow ? actorRow.name : "시스템",
-      message: formatNotificationMessage(delivery.event_type, payload)
-    };
-
-    try {
-      await postWebhook(delivery, notification);
-      db.prepare(
-        "UPDATE webhook_deliveries SET status = 'sent', attempts = attempts + 1, updated_at = ?, delivered_at = ? WHERE id = ?"
-      ).run(Date.now(), Date.now(), delivery.id);
-    } catch (error) {
-      const attempts = delivery.attempts + 1;
-      if (attempts >= delivery.max_attempts) {
-        db.prepare("UPDATE webhook_deliveries SET status = 'failed', attempts = ?, updated_at = ?, last_error = ? WHERE id = ?").run(
-          attempts,
-          Date.now(),
-          String(error.message || error),
-          delivery.id
-        );
-      } else {
-        const backoffMs = Math.min(600000, 1000 * 2 ** (attempts - 1));
-        db.prepare(
-          "UPDATE webhook_deliveries SET status = 'retry', attempts = ?, updated_at = ?, next_attempt_at = ?, last_error = ? WHERE id = ?"
-        ).run(attempts, Date.now(), Date.now() + backoffMs, String(error.message || error), delivery.id);
-      }
-    }
-  }
-}
-
-function ensureWebhookWorker() {
-  if (globalRef.__mumurWebhookWorker) {
-    return;
-  }
-  globalRef.__mumurWebhookWorker = setInterval(() => {
-    processWebhookQueue().catch((error) => {
-      void error;
-    });
-  }, 4000);
-  globalRef.__mumurWebhookWorker.unref?.();
-}
-
-function enqueueWebhookDeliveries(teamId, eventId) {
-  const hooks = db.prepare("SELECT * FROM workspace_webhooks WHERE team_id = ? AND enabled = 1 ORDER BY id ASC").all(teamId);
-  if (!hooks.length) {
-    return;
-  }
-
-  const now = Date.now();
-  hooks.forEach((hook) => {
-    queries.insertWebhookDeliveryIfMissing({
-      webhookId: hook.id,
-      eventId,
-      nextAttemptAt: now,
-      createdAt: now,
-      updatedAt: now
-    });
-  });
-
-  ensureWebhookWorker();
-  processWebhookQueue().catch((error) => {
-    void error;
-  });
 }
 
 function recordTeamEvent(teamId, ideaId, userId, eventType, payload) {
@@ -409,40 +419,16 @@ function recordTeamEvent(teamId, ideaId, userId, eventType, payload) {
     read: false
   };
 
+  broadcastTeamStreamEvent(teamId, eventType, {
+    teamId,
+    ideaId,
+    actorUserId: userId,
+    eventId,
+    createdAt,
+    ...(payload || {})
+  });
   broadcastTeamNotification(teamId, notification);
-  enqueueWebhookDeliveries(teamId, eventId);
-}
-
-function getSessionToken(request) {
-  const tokenFromRequest = request.cookies?.get?.(SESSION_COOKIE)?.value;
-  if (tokenFromRequest) {
-    return tokenFromRequest;
-  }
-  const parsed = parseCookieHeader(request.headers.get("cookie") || "");
-  return parsed[SESSION_COOKIE] || null;
-}
-
-function authContext(request) {
-  clearExpiredSessions(queries);
-  const token = getSessionToken(request);
-  if (!token) {
-    return null;
-  }
-
-  const session = db
-    .prepare(
-      "SELECT s.id, s.user_id, s.team_id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ?"
-    )
-    .get(token, Date.now());
-
-  if (!session) {
-    return null;
-  }
-
-  return {
-    session: { id: session.id, userId: session.user_id, teamId: session.team_id },
-    user: { id: session.user_id, name: session.name, email: session.email }
-  };
+  enqueueWebhookDeliveries(db, queries, globalRef, formatNotificationMessage, teamId, eventId);
 }
 
 const ROLE_LEVEL: Record<string, number> = {
@@ -487,6 +473,7 @@ function ideaPriorityLevel(row) {
 function toInvitationPayload(row) {
   return {
     id: row.id,
+    workspaceId: row.team_id,
     teamId: row.team_id,
     email: row.email,
     role: row.role,
@@ -496,46 +483,68 @@ function toInvitationPayload(row) {
     invitedByName: row.inviter_name,
     resolvedBy: row.resolved_by,
     resolvedByName: row.resolver_name,
+    teamName: row.team_name,
+    teamIcon: row.team_icon,
+    teamColor: row.team_color,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
 }
 
-function withSessionCookie(response, token, expiresAt) {
-  response.cookies.set({
-    name: SESSION_COOKIE,
-    value: token,
-    httpOnly: true,
-    sameSite: "lax",
-    secure: false,
-    expires: new Date(expiresAt),
-    path: "/"
-  });
-  return response;
-}
-
-function clearSessionCookie(response) {
-  response.cookies.delete(SESSION_COOKIE);
-  return response;
-}
-
-async function readJsonBody(request) {
-  const contentType = request.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    return {};
+function invitationMessageForPending(email, userName, registered, retried = false) {
+  if (registered) {
+    const label = normalizeText(userName) || email;
+    return retried
+      ? `${label}님에게 초대를 다시 보냈습니다. 수락 전까지 대기 상태입니다.`
+      : `${label}님에게 초대를 보냈습니다. 수락 전까지 팀에 참여하지 않습니다.`;
   }
-  return request.json().catch(() => ({}));
+  return retried
+    ? "가입 후 초대를 수락하면 팀에 참여할 수 있도록 초대를 다시 보냈습니다."
+    : "가입 후 초대를 수락하면 팀에 참여할 수 있습니다.";
 }
 
-function uploadDestination() {
-  const cwd = process.cwd();
-  const dest = path.resolve(cwd, "public", "uploads");
-  ensureDir(dest);
-  return dest;
+function invitationMessageForAccepted(alreadyMember = false) {
+  return alreadyMember ? "이미 팀 멤버입니다." : "초대를 수락해 팀에 참여했습니다.";
 }
+
+function invitationMessageForCancelled() {
+  return "초대를 취소했습니다.";
+}
+
+function getInvitationRowById(invitationId) {
+  return db
+    .prepare(
+      `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name,
+              w.name AS team_name, w.icon AS team_icon, w.color AS team_color
+       FROM workspace_invitations i
+       JOIN workspaces w ON w.id = i.team_id
+       JOIN users inviter ON inviter.id = i.invited_by
+       LEFT JOIN users resolver ON resolver.id = i.resolved_by
+       WHERE i.id = ?`
+    )
+    .get(invitationId);
+}
+
+function getInvitationRowByTeamAndEmail(teamId, email) {
+  return db
+    .prepare(
+      `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name,
+              w.name AS team_name, w.icon AS team_icon, w.color AS team_color
+       FROM workspace_invitations i
+       JOIN workspaces w ON w.id = i.team_id
+       JOIN users inviter ON inviter.id = i.invited_by
+       LEFT JOIN users resolver ON resolver.id = i.resolved_by
+       WHERE i.team_id = ? AND i.email = ?`
+    )
+    .get(teamId, email);
+}
+
 
 async function handleRequest(request, slug, method) {
   const s = slug || [];
+
+  try {
+    ensureMutationOrigin(request, method);
 
   if (s.length === 1 && s[0] === "health" && method === "GET") {
     return json({ ok: true, now: Date.now() });
@@ -547,12 +556,22 @@ async function handleRequest(request, slug, method) {
     const email = normalizeText(body.email).toLowerCase();
     const password = String(body.password || "");
     const teamName = normalizeText(body.teamName);
+    const registerRateLimit = getAuthRateLimitStatus(request, "register", email);
 
-    if (!name || !email || password.length < 6 || !teamName) {
-      return json({ error: "이름, 이메일, 비밀번호(6자 이상), 팀 이름은 필수입니다" }, 400);
+    if (!registerRateLimit.allowed) {
+      return NextResponse.json({ error: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요." }, {
+        status: 429,
+        headers: { "Retry-After": String(registerRateLimit.retryAfterSeconds) }
+      });
+    }
+
+    if (!name || !email || !teamName || !isPasswordPolicyValid(password)) {
+      registerAuthRateLimitFailure(request, "register", email);
+      return json({ error: `이름, 이메일, 팀 이름은 필수이며 ${passwordPolicyMessage()}` }, 400);
     }
     const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
     if (existing) {
+      registerAuthRateLimitFailure(request, "register", email);
       return json({ error: "이미 가입된 이메일입니다" }, 409);
     }
 
@@ -570,18 +589,28 @@ async function handleRequest(request, slug, method) {
       return { userId, teamId };
     });
 
+    clearAuthRateLimit(request, "register", email);
       const session = createSession(queries, created.userId, created.teamId);
     const response = json({ user: { id: created.userId, name, email }, workspace: { id: created.teamId, name: teamName } }, 201);
-    return withSessionCookie(response, session.token, session.expiresAt);
+    return withSessionCookie(request, response, session.token, session.expiresAt);
   }
 
   if (s[0] === "auth" && s[1] === "login" && method === "POST") {
     const body = await readJsonBody(request);
     const email = normalizeText(body.email).toLowerCase();
     const password = String(body.password || "");
+    const loginRateLimit = getAuthRateLimitStatus(request, "login", email);
+
+    if (!loginRateLimit.allowed) {
+      return NextResponse.json({ error: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요." }, {
+        status: 429,
+        headers: { "Retry-After": String(loginRateLimit.retryAfterSeconds) }
+      });
+    }
 
     const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
     if (!user || !verifyPassword(password, user.password_hash)) {
+      registerAuthRateLimitFailure(request, "login", email);
       return json({ error: "이메일 또는 비밀번호가 올바르지 않습니다" }, 401);
     }
 
@@ -590,12 +619,13 @@ async function handleRequest(request, slug, method) {
       return json({ error: "소속된 팀이 없습니다" }, 403);
     }
 
+    clearAuthRateLimit(request, "login", email);
       const session = createSession(queries, user.id, team.teamId);
     const response = json({
       user: { id: user.id, name: user.name, email: user.email },
       workspace: { id: team.teamId, name: team.teamName }
     });
-    return withSessionCookie(response, session.token, session.expiresAt);
+    return withSessionCookie(request, response, session.token, session.expiresAt);
   }
 
   if (s[0] === "auth" && s[1] === "logout" && method === "POST") {
@@ -603,10 +633,10 @@ async function handleRequest(request, slug, method) {
     if (token) {
       db.prepare("DELETE FROM sessions WHERE id = ?").run(token);
     }
-    return clearSessionCookie(json({ ok: true }));
+    return clearSessionCookie(request, json({ ok: true }));
   }
 
-  const ctx = authContext(request);
+  const ctx = authContext(db, queries, request);
   if (!ctx) {
     return json({ error: "인증이 필요합니다" }, 401);
   }
@@ -625,6 +655,10 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "auth" && s[1] === "me" && method === "PATCH") {
+    const rateLimitResponse = enforceMutationRateLimit(request, "auth-profile-update", ctx.user.id);
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
     const body = await readJsonBody(request);
     const user = db
       .prepare("SELECT id, name, email, password_hash FROM users WHERE id = ?")
@@ -645,8 +679,8 @@ async function handleRequest(request, slug, method) {
       }
     }
 
-    if (changingPassword && cleanNewPwd.length < 8) {
-      return json({ error: "새 비밀번호는 8자 이상이어야 합니다" }, 400);
+    if (changingPassword && !isPasswordPolicyValid(cleanNewPwd)) {
+      return json({ error: passwordPolicyMessage("새 비밀번호") }, 400);
     }
 
     if (changingEmail) {
@@ -696,7 +730,7 @@ async function handleRequest(request, slug, method) {
     if (!draft) {
       return json({ draft: null });
     }
-    return json({ draft: { ideaId, payload: JSON.parse(draft.payload_json), updatedAt: draft.updated_at } });
+    return json({ draft: { ideaId, payload: parseStoredDraftPayload(draft.payload_json), updatedAt: draft.updated_at } });
   }
 
   if (s[0] === "drafts" && s.length === 2 && method === "PUT") {
@@ -728,7 +762,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspaces" && s.length === 1 && method === "GET") {
-     const workspaces = db
+      const workspaces = db
       .prepare(
         `SELECT t.id, t.name, t.owner_id, t.icon, t.color,
                 tm.role,
@@ -749,7 +783,25 @@ async function handleRequest(request, slug, method) {
         joinedAt: row.created_at,
         active: row.id === ctx.session.teamId
       }));
-    return json({ workspaces });
+
+    const pendingInvitations = db
+      .prepare(
+        `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name,
+                w.name AS team_name, w.icon AS team_icon, w.color AS team_color
+         FROM workspace_invitations i
+         JOIN workspaces w ON w.id = i.team_id
+         JOIN users inviter ON inviter.id = i.invited_by
+         LEFT JOIN users resolver ON resolver.id = i.resolved_by
+         LEFT JOIN workspace_members wm ON wm.team_id = i.team_id AND wm.user_id = ?
+         WHERE LOWER(i.email) = ?
+           AND i.status = 'pending'
+           AND wm.user_id IS NULL
+         ORDER BY i.updated_at DESC`
+      )
+      .all(ctx.user.id, String(ctx.user.email || "").toLowerCase())
+      .map(toInvitationPayload);
+
+    return json({ workspaces, pendingInvitations });
   }
 
   if (s[0] === "workspaces" && s.length === 1 && method === "POST") {
@@ -759,10 +811,14 @@ async function handleRequest(request, slug, method) {
       return json({ error: "팀 이름은 필수입니다" }, 400);
     }
     const now = Date.now();
-    const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, ctx.user.id, now, now);
-    const teamId = queries.extractInsertId(teamResult);
-    db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, ctx.user.id, "owner", now);
-    db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(teamId, ctx.session.id);
+    const created = queries.withTransaction(() => {
+      const teamResult = db.prepare("INSERT INTO workspaces (name, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?)").run(teamName, ctx.user.id, now, now);
+      const teamId = queries.extractInsertId(teamResult);
+      db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(teamId, ctx.user.id, "owner", now);
+      db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(teamId, ctx.session.id);
+      return { teamId };
+    });
+    const teamId = created.teamId;
     recordTeamEvent(teamId, null, ctx.user.id, "workspace.created", { teamName });
     return json({ workspace: { id: teamId, name: teamName } }, 201);
   }
@@ -849,34 +905,36 @@ async function handleRequest(request, slug, method) {
       return json({ error: "워크스페이스를 찾을 수 없습니다" }, 404);
     }
 
-    if (Number(workspace.owner_id) === Number(ctx.user.id)) {
-      const fallbackOwner = db
-        .prepare(
-          "SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id != ? AND role = 'owner' ORDER BY created_at ASC LIMIT 1"
-        )
-        .get(workspaceId, ctx.user.id);
-      if (!fallbackOwner?.user_id) {
-        return json({ error: "워크스페이스 소유권을 이전할 수 없어 탈퇴할 수 없습니다" }, 400);
+    let nextWorkspaceId = ctx.session.teamId;
+    const leaveResult = queries.withTransaction(() => {
+      if (Number(workspace.owner_id) === Number(ctx.user.id)) {
+        const fallbackOwner = db
+          .prepare(
+            "SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id != ? AND role = 'owner' ORDER BY created_at ASC LIMIT 1"
+          )
+          .get(workspaceId, ctx.user.id);
+        if (!fallbackOwner?.user_id) {
+          throw new RequestValidationError("워크스페이스 소유권을 이전할 수 없어 탈퇴할 수 없습니다", 400);
+        }
+        db.prepare("UPDATE workspaces SET owner_id = ?, updated_at = ? WHERE id = ?").run(fallbackOwner.user_id, Date.now(), workspaceId);
       }
-      db.prepare("UPDATE workspaces SET owner_id = ?, updated_at = ? WHERE id = ?").run(fallbackOwner.user_id, Date.now(), workspaceId);
-    }
 
-    db.prepare("DELETE FROM workspace_members WHERE team_id = ? AND user_id = ?").run(workspaceId, ctx.user.id);
+      db.prepare("DELETE FROM workspace_members WHERE team_id = ? AND user_id = ?").run(workspaceId, ctx.user.id);
+      if (Number(ctx.session.teamId) === workspaceId) {
+        const nextMembership = db
+          .prepare("SELECT team_id FROM workspace_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1")
+          .get(ctx.user.id);
+        if (!nextMembership?.team_id) {
+          throw new RequestValidationError("전환할 워크스페이스를 찾을 수 없습니다", 500);
+        }
+        nextWorkspaceId = Number(nextMembership.team_id);
+        db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(nextWorkspaceId, ctx.session.id);
+      }
+      return { nextWorkspaceId };
+    });
     recordTeamEvent(workspaceId, null, ctx.user.id, "team.member.left", { userId: ctx.user.id });
 
-    let nextWorkspaceId = ctx.session.teamId;
-    if (Number(ctx.session.teamId) === workspaceId) {
-      const nextMembership = db
-        .prepare("SELECT team_id FROM workspace_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1")
-        .get(ctx.user.id);
-      if (!nextMembership?.team_id) {
-        return json({ error: "전환할 워크스페이스를 찾을 수 없습니다" }, 500);
-      }
-      nextWorkspaceId = Number(nextMembership.team_id);
-      db.prepare("UPDATE sessions SET team_id = ? WHERE id = ?").run(nextWorkspaceId, ctx.session.id);
-    }
-
-    return json({ ok: true, nextWorkspaceId });
+    return json({ ok: true, nextWorkspaceId: leaveResult.nextWorkspaceId });
   }
 
   if (s[0] === "workspace" && s[1] === "members" && s.length === 2 && method === "GET") {
@@ -995,8 +1053,10 @@ async function handleRequest(request, slug, method) {
   if (s[0] === "workspace" && s[1] === "invitations" && s.length === 2 && method === "GET") {
     const rows = db
       .prepare(
-        `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
+        `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name,
+                w.name AS team_name, w.icon AS team_icon, w.color AS team_color
          FROM workspace_invitations i
+         JOIN workspaces w ON w.id = i.team_id
          JOIN users inviter ON inviter.id = i.invited_by
          LEFT JOIN users resolver ON resolver.id = i.resolved_by
          WHERE i.team_id = ?
@@ -1004,6 +1064,35 @@ async function handleRequest(request, slug, method) {
       )
       .all(ctx.session.teamId);
     return json({ invitations: rows.map(toInvitationPayload) });
+  }
+
+  if (s[0] === "workspace" && s[1] === "invitations" && s[2] === "preview" && method === "GET") {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
+      return json({ error: "권한이 없습니다" }, 403);
+    }
+
+    const url = new URL(request.url);
+    const email = normalizeText(url.searchParams.get("email")).toLowerCase();
+    if (!email) {
+      return json({ error: "이메일은 필수입니다" }, 400);
+    }
+
+    const user = db.prepare("SELECT id, name, email FROM users WHERE email = ?").get(email);
+    const existingMember = user
+      ? db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id)
+      : null;
+    const invitation = getInvitationRowByTeamAndEmail(ctx.session.teamId, email);
+
+    return json({
+      preview: {
+        email,
+        registered: Boolean(user),
+        userId: user?.id ?? null,
+        name: user?.name ?? null,
+        memberRole: existingMember?.role ?? null,
+        invitation: invitation ? toInvitationPayload(invitation) : null,
+      },
+    });
   }
 
   if (s[0] === "workspace" && s[1] === "invitations" && s.length === 2 && method === "POST") {
@@ -1022,51 +1111,35 @@ async function handleRequest(request, slug, method) {
     }
 
     const user = db.prepare("SELECT id, name, email FROM users WHERE email = ?").get(email);
-    let status = "pending";
-    let message = "아직 가입하지 않은 이메일입니다. 가입 후 재시도로 멤버 추가를 완료하세요.";
-    let resolvedBy = null;
-
     if (user) {
-      const existingMember = db.prepare("SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
+      const existingMember = db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
       if (existingMember) {
-        status = "accepted";
-        message = "이미 팀 멤버입니다.";
-        resolvedBy = ctx.user.id;
-      } else {
-        db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
-          ctx.session.teamId,
-          user.id,
-          role,
-          Date.now()
-        );
-        recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.member.added", { invitedUserId: user.id, role });
-        status = "accepted";
-        message = "가입된 사용자를 팀에 즉시 추가했습니다.";
-        resolvedBy = ctx.user.id;
+        return json({ error: "이미 팀 멤버입니다" }, 409);
       }
     }
 
     const now = Date.now();
     const existingInvite = db.prepare("SELECT id FROM workspace_invitations WHERE team_id = ? AND email = ?").get(ctx.session.teamId, email);
+    const status = "pending";
+    const message = invitationMessageForPending(email, user?.name, Boolean(user));
     if (existingInvite) {
       db.prepare(
         "UPDATE workspace_invitations SET role = ?, status = ?, message = ?, invited_by = ?, resolved_by = ?, updated_at = ? WHERE id = ?"
-      ).run(role, status, message, ctx.user.id, resolvedBy, now, existingInvite.id);
+      ).run(role, status, message, ctx.user.id, null, now, existingInvite.id);
     } else {
       db.prepare(
         "INSERT INTO workspace_invitations (team_id, email, role, status, message, invited_by, resolved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-      ).run(ctx.session.teamId, email, role, status, message, ctx.user.id, resolvedBy, now, now);
+      ).run(ctx.session.teamId, email, role, status, message, ctx.user.id, null, now, now);
     }
 
-    const invitation = db
-      .prepare(
-        `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
-         FROM workspace_invitations i
-         JOIN users inviter ON inviter.id = i.invited_by
-         LEFT JOIN users resolver ON resolver.id = i.resolved_by
-         WHERE i.team_id = ? AND i.email = ?`
-      )
-      .get(ctx.session.teamId, email);
+    const invitation = getInvitationRowByTeamAndEmail(ctx.session.teamId, email);
+
+    recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.invitation.pending", {
+      email,
+      invitationId: invitation?.id ?? existingInvite?.id ?? null,
+      role,
+      targetUserId: user?.id ?? null,
+    });
 
     return json({ invitation: toInvitationPayload(invitation) }, 201);
   }
@@ -1086,47 +1159,125 @@ async function handleRequest(request, slug, method) {
       return json({ error: "취소된 초대는 재시도할 수 없습니다" }, 400);
     }
 
-    const user = db.prepare("SELECT id FROM users WHERE email = ?").get(invitation.email);
-    let status = "pending";
-    let message = "아직 가입하지 않은 이메일입니다. 가입 후 다시 재시도하세요.";
-    let resolvedBy = null;
+    const user = db.prepare("SELECT id, name FROM users WHERE email = ?").get(invitation.email);
+    const existingMember = user
+      ? db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id)
+      : null;
+    const status = existingMember ? "accepted" : "pending";
+    const message = existingMember
+      ? invitationMessageForAccepted(true)
+      : invitationMessageForPending(invitation.email, user?.name, Boolean(user), true);
 
-    if (user) {
-      const existingMember = db.prepare("SELECT user_id FROM workspace_members WHERE team_id = ? AND user_id = ?").get(ctx.session.teamId, user.id);
-      if (!existingMember) {
-        db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
-          ctx.session.teamId,
-          user.id,
-          invitation.role,
-          Date.now()
-        );
-        recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.member.added", { invitedUserId: user.id, role: invitation.role });
-        message = "재시도 성공: 사용자를 팀 멤버로 추가했습니다.";
-      } else {
-        message = "이미 팀 멤버입니다.";
-      }
-      status = "accepted";
-      resolvedBy = ctx.user.id;
-    }
-
-    db.prepare("UPDATE workspace_invitations SET status = ?, message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+    db.prepare("UPDATE workspace_invitations SET role = ?, status = ?, message = ?, invited_by = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+      invitation.role,
       status,
       message,
-      resolvedBy,
+      ctx.user.id,
+      existingMember ? user?.id ?? null : null,
       Date.now(),
       invitationId
     );
 
-    const updated = db
-      .prepare(
-        `SELECT i.*, inviter.name AS inviter_name, resolver.name AS resolver_name
-         FROM workspace_invitations i
-         JOIN users inviter ON inviter.id = i.invited_by
-         LEFT JOIN users resolver ON resolver.id = i.resolved_by
-         WHERE i.id = ?`
-      )
-      .get(invitationId);
+    recordTeamEvent(
+      ctx.session.teamId,
+      null,
+      ctx.user.id,
+      existingMember ? "team.invitation.accepted" : "team.invitation.pending",
+      {
+        email: invitation.email,
+        invitationId,
+        role: invitation.role,
+        retry: true,
+        targetUserId: user?.id ?? null,
+      }
+    );
+
+    const updated = getInvitationRowById(invitationId);
     return json({ invitation: toInvitationPayload(updated) });
+  }
+
+  if (s[0] === "workspace" && s[1] === "invitations" && s[2] && s[3] === "accept" && method === "POST") {
+    const invitationId = Number(s[2]);
+    const invitation = db.prepare("SELECT * FROM workspace_invitations WHERE id = ?").get(invitationId);
+    if (!invitation) {
+      return json({ error: "초대 정보를 찾을 수 없습니다" }, 404);
+    }
+    if (String(invitation.email || "").toLowerCase() !== String(ctx.user.email || "").toLowerCase()) {
+      return json({ error: "해당 초대를 수락할 수 없습니다" }, 403);
+    }
+    if (invitation.status === "cancelled") {
+      return json({ error: "취소된 초대입니다" }, 400);
+    }
+
+    const existingMember = db.prepare("SELECT role FROM workspace_members WHERE team_id = ? AND user_id = ?").get(invitation.team_id, ctx.user.id);
+    if (!existingMember) {
+      db.prepare("INSERT INTO workspace_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)").run(
+        invitation.team_id,
+        ctx.user.id,
+        invitation.role,
+        Date.now()
+      );
+      recordTeamEvent(invitation.team_id, null, ctx.user.id, "team.member.added", { invitedUserId: ctx.user.id, role: invitation.role });
+    }
+
+    db.prepare("UPDATE workspace_invitations SET status = 'accepted', message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+      invitationMessageForAccepted(Boolean(existingMember)),
+      ctx.user.id,
+      Date.now(),
+      invitationId
+    );
+
+    recordTeamEvent(invitation.team_id, null, ctx.user.id, "team.invitation.accepted", {
+      email: invitation.email,
+      invitationId,
+      role: invitation.role,
+      targetUserId: ctx.user.id,
+    });
+
+    const updatedInvitation = getInvitationRowById(invitationId);
+    const workspace = db.prepare("SELECT id, name, icon, color, owner_id FROM workspaces WHERE id = ?").get(invitation.team_id);
+    return json({
+      ok: true,
+      invitation: toInvitationPayload(updatedInvitation),
+      workspace: workspace
+        ? { id: workspace.id, name: workspace.name, icon: workspace.icon, color: workspace.color, ownerId: workspace.owner_id }
+        : null,
+    });
+  }
+
+  if (s[0] === "workspace" && s[1] === "invitations" && s[2] && s[3] === "decline" && method === "POST") {
+    const invitationId = Number(s[2]);
+    const invitation = db.prepare("SELECT * FROM workspace_invitations WHERE id = ?").get(invitationId);
+    if (!invitation) {
+      return json({ error: "초대 정보를 찾을 수 없습니다" }, 404);
+    }
+    if (String(invitation.email || "").toLowerCase() !== String(ctx.user.email || "").toLowerCase()) {
+      return json({ error: "해당 초대를 거절할 수 없습니다" }, 403);
+    }
+    if (invitation.status === "accepted") {
+      return json({ error: "이미 수락된 초대입니다" }, 400);
+    }
+    if (invitation.status === "cancelled") {
+      return json({ error: "이미 종료된 초대입니다" }, 400);
+    }
+
+    db.prepare("UPDATE workspace_invitations SET status = 'cancelled', message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+      invitationMessageForCancelled(),
+      ctx.user.id,
+      Date.now(),
+      invitationId
+    );
+
+    recordTeamEvent(invitation.team_id, null, ctx.user.id, "team.invitation.cancelled", {
+      email: invitation.email,
+      invitationId,
+      role: invitation.role,
+      targetUserId: ctx.user.id,
+      declinedByInvitee: true,
+    });
+
+    const updatedInvitation = getInvitationRowById(invitationId);
+    return json({ ok: true, invitation: toInvitationPayload(updatedInvitation) });
   }
 
   if (s[0] === "workspace" && s[1] === "invitations" && s[2] && method === "DELETE") {
@@ -1135,12 +1286,24 @@ async function handleRequest(request, slug, method) {
     }
     const invitationId = Number(s[2]);
     const invitation = db
-      .prepare("SELECT id FROM workspace_invitations WHERE id = ? AND team_id = ?")
+      .prepare("SELECT id, email, role FROM workspace_invitations WHERE id = ? AND team_id = ?")
       .get(invitationId, ctx.session.teamId);
     if (!invitation) {
       return json({ error: "초대 정보를 찾을 수 없습니다" }, 404);
     }
-    db.prepare("UPDATE workspace_invitations SET status = 'cancelled', updated_at = ? WHERE id = ?").run(Date.now(), invitationId);
+    const user = db.prepare("SELECT id FROM users WHERE email = ?").get(invitation.email);
+    db.prepare("UPDATE workspace_invitations SET status = 'cancelled', message = ?, resolved_by = ?, updated_at = ? WHERE id = ?").run(
+      invitationMessageForCancelled(),
+      ctx.user.id,
+      Date.now(),
+      invitationId
+    );
+    recordTeamEvent(ctx.session.teamId, null, ctx.user.id, "team.invitation.cancelled", {
+      email: invitation.email,
+      invitationId,
+      role: invitation.role,
+      targetUserId: user?.id ?? null,
+    });
     return json({ ok: true });
   }
 
@@ -1414,6 +1577,56 @@ async function handleRequest(request, slug, method) {
       return json({ error: "아이디어를 찾을 수 없습니다" }, 404);
     }
 
+    if (s[2] === "collab" && s[3] === "checkpoint" && method === "GET") {
+      return json({ checkpoint: toIdeaCollabCheckpoint(toIdeaPayload(idea)) });
+    }
+
+    if (s[2] === "collab" && s[3] === "checkpoint" && method === "PUT") {
+      if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+        return json({ error: "편집 권한이 없습니다" }, 403);
+      }
+      const body = await readJsonBody(request);
+      const baseUpdatedAt = Number(body.baseUpdatedAt);
+      if (!Number.isFinite(baseUpdatedAt) || baseUpdatedAt <= 0) {
+        return json({ error: "baseUpdatedAt는 필수입니다" }, 400);
+      }
+
+      const title = normalizeText(body.title) || idea.title;
+      const blocks = parseBlocks(body.blocks);
+      const now = Date.now();
+      const updateResult = db.prepare(
+        "UPDATE ideas SET title = ?, blocks_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?"
+      ).run(title, JSON.stringify(blocks), now, ideaId, baseUpdatedAt);
+
+      if (!updateResult.changes) {
+        const latestIdea = getIdeaForTeam(ideaId, ctx.session.teamId);
+        return json({ error: "최신 변경사항과 충돌했습니다", checkpoint: latestIdea ? toIdeaCollabCheckpoint(toIdeaPayload(latestIdea)) : null }, 409);
+      }
+
+      const ideaUpdatePayload = getIdeaUpdateEventPayload(idea, {
+        title,
+        category: idea.category,
+        status: idea.status,
+        priority: String(idea.priority || "low"),
+      });
+      if (ideaUpdatePayload) {
+        recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", ideaUpdatePayload);
+      }
+      broadcastIdeaRefresh(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated");
+
+      const lastSnapshot = db.prepare(
+        "SELECT created_at FROM idea_versions WHERE idea_id = ? AND version_label LIKE 'auto-%' ORDER BY created_at DESC LIMIT 1"
+      ).get(ideaId) as { created_at: number } | undefined;
+      if (shouldCreateAutoCheckpoint(lastSnapshot?.created_at, now)) {
+        db.prepare(
+          "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
+        ).run(ideaId, `auto-${new Date(now).toISOString().slice(0, 16).replace("T", " ")}`, JSON.stringify(blocks), ctx.user.id, now);
+      }
+
+      const latestIdea = getIdeaForTeam(ideaId, ctx.session.teamId);
+      return json({ checkpoint: latestIdea ? toIdeaCollabCheckpoint(toIdeaPayload(latestIdea)) : null });
+    }
+
     if (s.length === 2 && method === "GET") {
       return json({ idea: toIdeaPayload(idea) });
     }
@@ -1423,6 +1636,10 @@ async function handleRequest(request, slug, method) {
         return json({ error: "편집 권한이 없습니다" }, 403);
       }
       const body = await readJsonBody(request);
+      const baseUpdatedAt = Number(body.baseUpdatedAt);
+      if (!Number.isFinite(baseUpdatedAt) || baseUpdatedAt <= 0) {
+        return json({ error: "baseUpdatedAt는 필수입니다" }, 400);
+      }
       const title = normalizeText(body.title) || idea.title;
       const category = normalizeText(body.category) || idea.category;
       const status = normalizeText(body.status) || idea.status;
@@ -1430,27 +1647,35 @@ async function handleRequest(request, slug, method) {
         ? String(body.priority)
         : String(idea.priority || "low");
       const blocks = parseBlocks(body.blocks);
+      const ideaUpdatePayload = getIdeaUpdateEventPayload(idea, { title, category, status, priority });
     const ideaStatuses: readonly string[] = IDEA_STATUS;
-    if (!ideaStatuses.includes(status)) {
+      if (!ideaStatuses.includes(status)) {
       return json({ error: "유효하지 않은 상태입니다" }, 400);
       }
       const now = Date.now();
-      db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, priority = ?, blocks_json = ?, updated_at = ? WHERE id = ?").run(
+      const updateResult = db.prepare("UPDATE ideas SET title = ?, category = ?, status = ?, priority = ?, blocks_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?").run(
         title,
         category,
         status,
         priority,
         JSON.stringify(blocks),
         now,
-        ideaId
+        ideaId,
+        baseUpdatedAt
       );
-      recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", { title, status, category, priority });
+      if (!updateResult.changes) {
+        const latestIdea = getIdeaForTeam(ideaId, ctx.session.teamId);
+        return json({ error: "최신 변경사항과 충돌했습니다", idea: latestIdea ? toIdeaPayload(latestIdea) : null }, 409);
+      }
+      if (ideaUpdatePayload) {
+        recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated", ideaUpdatePayload);
+      }
+      broadcastIdeaRefresh(ctx.session.teamId, ideaId, ctx.user.id, "idea.updated");
 
       const lastSnapshot = db.prepare(
         "SELECT created_at FROM idea_versions WHERE idea_id = ? AND version_label LIKE 'auto-%' ORDER BY created_at DESC LIMIT 1"
       ).get(ideaId) as { created_at: number } | undefined;
-      const snapshotInterval = 5 * 60 * 1000;
-      if (!lastSnapshot || now - lastSnapshot.created_at >= snapshotInterval) {
+      if (shouldCreateAutoCheckpoint(lastSnapshot?.created_at, now)) {
         db.prepare(
           "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
         ).run(ideaId, `auto-${new Date(now).toISOString().slice(0, 16).replace("T", " ")}`, JSON.stringify(blocks), ctx.user.id, now);
@@ -1463,9 +1688,66 @@ async function handleRequest(request, slug, method) {
       if (!hasMinRole(ctx.session.teamId, ctx.user.id, "deleter")) {
         return json({ error: "삭제 권한이 없습니다" }, 403);
       }
-      db.prepare("DELETE FROM ideas WHERE id = ?").run(ideaId);
+      clearIdeaPresenceForIdea(ctx.session.teamId, ideaId);
+      db.prepare("DELETE FROM ideas WHERE id = ? AND team_id = ?").run(ideaId, ctx.session.teamId);
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "idea.deleted", { title: idea.title });
       return json({ ok: true });
+    }
+
+    if (s[2] === "presence" && method === "GET") {
+      return json({
+        ideaId,
+        presence: listIdeaPresence(ctx.session.teamId, ideaId),
+        ttlMs: IDEA_PRESENCE_TTL_MS
+      });
+    }
+
+    if (s[2] === "presence" && method === "POST") {
+      const body = await readJsonBody(request);
+      const blockId = normalizeText(body.blockId);
+      const rawCursor = Number(body.cursorOffset);
+      const cursorOffset = Number.isFinite(rawCursor) ? Math.max(0, Math.trunc(rawCursor)) : null;
+      const isTyping = Boolean(body.typing);
+
+      if (!blockId) {
+        clearIdeaPresence(ctx.session.teamId, ideaId, ctx.user.id);
+        return json({
+          ok: true,
+          ideaId,
+          presence: listIdeaPresence(ctx.session.teamId, ideaId)
+        });
+      }
+
+      const ids = ideaBlockIds(idea);
+      if (!ids.has(blockId)) {
+        clearIdeaPresence(ctx.session.teamId, ideaId, ctx.user.id);
+        return json({
+          ok: true,
+          ignored: true,
+          reason: "unsynced-block",
+          ideaId,
+          presence: listIdeaPresence(ctx.session.teamId, ideaId),
+          ttlMs: IDEA_PRESENCE_TTL_MS
+        });
+      }
+
+      if (shouldThrottleIdeaPresence(ctx.session.teamId, ideaId, ctx.user.id)) {
+        return json({
+          ok: true,
+          throttled: true,
+          ideaId,
+          presence: listIdeaPresence(ctx.session.teamId, ideaId),
+          ttlMs: IDEA_PRESENCE_TTL_MS
+        });
+      }
+
+      upsertIdeaPresence(ctx.session.teamId, ideaId, ctx.user, blockId, cursorOffset, isTyping);
+      return json({
+        ok: true,
+        ideaId,
+        presence: listIdeaPresence(ctx.session.teamId, ideaId),
+        ttlMs: IDEA_PRESENCE_TTL_MS
+      });
     }
 
     if (s[2] === "comments" && method === "GET") {
@@ -1495,6 +1777,10 @@ async function handleRequest(request, slug, method) {
     if (s[2] === "comments" && method === "POST") {
       if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
         return json({ error: "댓글 작성 권한이 없습니다" }, 403);
+      }
+      const rateLimitResponse = enforceMutationRateLimit(request, "comment-create", `${ctx.user.id}:${ideaId}`);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
       }
       const body = await readJsonBody(request);
       const content = normalizeText(body.content);
@@ -1561,16 +1847,26 @@ async function handleRequest(request, slug, method) {
       if (existing.user_id !== ctx.user.id && !canModerate) {
         return json({ error: "댓글 수정 권한이 없습니다" }, 403);
       }
+      const rateLimitResponse = enforceMutationRateLimit(request, "comment-update", `${ctx.user.id}:${ideaId}`);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
       const body = await readJsonBody(request);
       const content = normalizeText(body.content);
       if (!content) {
         return json({ error: "내용은 필수입니다" }, 400);
       }
-      db.prepare("UPDATE comments SET content = ? WHERE id = ?").run(content, commentId);
+      const updateResult = db.prepare("UPDATE comments SET content = ? WHERE id = ? AND idea_id = ?").run(content, commentId, ideaId);
+      if (!updateResult.changes) {
+        return json({ error: "댓글을 찾을 수 없습니다" }, 404);
+      }
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "comment.updated", { commentId, blockId: existing.block_id || null });
       const updated = db
         .prepare("SELECT c.*, u.name AS user_name FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? LIMIT 1")
         .get(commentId);
+      if (!updated) {
+        return json({ error: "댓글을 찾을 수 없습니다" }, 404);
+      }
       return json({
         comment: {
           id: updated.id,
@@ -1590,6 +1886,10 @@ async function handleRequest(request, slug, method) {
       if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
         return json({ error: "댓글 삭제 권한이 없습니다" }, 403);
       }
+      const rateLimitResponse = enforceMutationRateLimit(request, "comment-delete", `${ctx.user.id}:${ideaId}`);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
       const commentId = Number(s[3]);
       const existing = db.prepare("SELECT * FROM comments WHERE id = ? AND idea_id = ?").get(commentId, ideaId);
       if (!existing) {
@@ -1599,7 +1899,10 @@ async function handleRequest(request, slug, method) {
       if (existing.user_id !== ctx.user.id && !canModerate) {
         return json({ error: "댓글 삭제 권한이 없습니다" }, 403);
       }
-      db.prepare("DELETE FROM comments WHERE id = ?").run(commentId);
+      const deleteResult = db.prepare("DELETE FROM comments WHERE id = ? AND idea_id = ?").run(commentId, ideaId);
+      if (!deleteResult.changes) {
+        return json({ error: "댓글을 찾을 수 없습니다" }, 404);
+      }
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "comment.deleted", { commentId, blockId: existing.block_id || null });
       return json({ ok: true });
     }
@@ -1608,17 +1911,39 @@ async function handleRequest(request, slug, method) {
       if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
         return json({ error: "파일 업로드 권한이 없습니다" }, 403);
       }
+      const rateLimitResponse = enforceMutationRateLimit(request, "block-upload", `${ctx.user.id}:${ideaId}`);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
       const blockId = normalizeText(s[3]);
-      const blocks = JSON.parse(idea.blocks_json || "[]");
+      const currentIdea = getIdeaForTeam(ideaId, ctx.session.teamId);
+      if (!currentIdea) {
+        return json({ error: "아이디어를 찾을 수 없습니다" }, 404);
+      }
+      const form = await request.formData();
+      const baseUpdatedAt = Number(form.get("baseUpdatedAt"));
+      if (!Number.isFinite(baseUpdatedAt) || baseUpdatedAt <= 0) {
+        return json({ error: "baseUpdatedAt는 필수입니다" }, 400);
+      }
+      if (Number(currentIdea.updated_at) !== baseUpdatedAt) {
+        return json({ error: "최신 변경사항과 충돌했습니다", idea: toIdeaPayload(currentIdea) }, 409);
+      }
+      const blocks = parseStoredIdeaBlocks(currentIdea.blocks_json);
       const index = blocks.findIndex((block) => String(block?.id || "") === blockId);
       if (index < 0) {
         return json({ error: "블록을 찾을 수 없습니다" }, 404);
       }
 
-      const form = await request.formData();
       const file = form.get("file");
       if (!file || typeof file.arrayBuffer !== "function" || !file.name) {
         return json({ error: "업로드할 파일이 필요합니다" }, 400);
+      }
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const nextBlockType = inferUploadedBlockType(String(blocks[index]?.type || "file"), file.name, file.type);
+      const validationError = validateUploadedBlockFile(nextBlockType, file, buffer);
+      if (validationError) {
+        return json({ error: validationError.message }, validationError.status);
       }
 
       const ext = path.extname(file.name);
@@ -1626,13 +1951,12 @@ async function handleRequest(request, slug, method) {
       const serverName = `${Date.now()}-${base}${ext}`;
       const uploadDir = uploadDestination();
       const absolute = path.join(uploadDir, serverName);
-      const buffer = Buffer.from(await file.arrayBuffer());
       fs.writeFileSync(absolute, buffer);
 
       const fileBlock = {
         name: file.name,
-        size: Number(file.size || buffer.length || 0),
-        type: String(file.type || "application/octet-stream"),
+        size: Number(buffer.length || 0),
+        type: resolveUploadedMimeType(file, buffer),
         filePath: `/uploads/${serverName}`,
         status: "uploaded",
         uploadedAt: Date.now(),
@@ -1641,13 +1965,19 @@ async function handleRequest(request, slug, method) {
 
       blocks[index] = {
         ...blocks[index],
-        type: "file",
+        type: nextBlockType,
         content: JSON.stringify(fileBlock)
       };
 
       const now = Date.now();
-      db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(blocks), now, ideaId);
+      const updateResult = db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?").run(JSON.stringify(blocks), now, ideaId, baseUpdatedAt);
+      if (!updateResult.changes) {
+        fs.rmSync(absolute, { force: true });
+        const latestIdea = getIdeaForTeam(ideaId, ctx.session.teamId);
+        return json({ error: "최신 변경사항과 충돌했습니다", idea: latestIdea ? toIdeaPayload(latestIdea) : null }, 409);
+      }
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "block.file.uploaded", { blockId, fileName: file.name });
+      broadcastIdeaRefresh(ctx.session.teamId, ideaId, ctx.user.id, "block.file.uploaded");
       return json({ fileBlock, idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
     }
 
@@ -1661,7 +1991,12 @@ async function handleRequest(request, slug, method) {
       if (targetType === "block") {
         const ids = ideaBlockIds(idea);
         if (!ids.has(targetId)) {
-          return json({ error: "유효하지 않은 블록 리액션 대상입니다" }, 400);
+          return json({
+            reactions: [],
+            mine: [],
+            ignored: true,
+            reason: "unsynced-block",
+          });
         }
       }
       if (targetType === "comment") {
@@ -1700,6 +2035,10 @@ async function handleRequest(request, slug, method) {
     if (s[2] === "reactions" && method === "POST") {
       if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
         return json({ error: "리액션 권한이 없습니다" }, 403);
+      }
+      const rateLimitResponse = enforceMutationRateLimit(request, "reaction", `${ctx.user.id}:${ideaId}`);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
       }
       const body = await readJsonBody(request);
       const emoji = normalizeText(body.emoji);
@@ -1745,9 +2084,16 @@ async function handleRequest(request, slug, method) {
         recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.removed", { emoji, targetType, targetId });
         return json({ toggled: false });
       }
-      db.prepare("INSERT INTO reactions (idea_id, user_id, emoji, target_type, target_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
-        ideaId, ctx.user.id, emoji, targetType, targetId, Date.now()
-      );
+      try {
+        db.prepare("INSERT INTO reactions (idea_id, user_id, emoji, target_type, target_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+          ideaId, ctx.user.id, emoji, targetType, targetId, Date.now()
+        );
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) {
+          throw error;
+        }
+        return json({ toggled: true, conflictSafe: true });
+      }
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "reaction.added", { emoji, targetType, targetId });
       return json({ toggled: true }, 201);
     }
@@ -1835,27 +2181,27 @@ async function handleRequest(request, slug, method) {
         id: number; notes: string | null; version_label: string
       } | undefined;
       if (!versionRow) return json({ error: "버전을 찾을 수 없습니다" }, 404);
-      let restoredBlocks: unknown[] = [];
-      if (versionRow.notes) {
-        try { restoredBlocks = JSON.parse(versionRow.notes); } catch { restoredBlocks = []; }
-      }
+      const restoredBlocks = parseStoredIdeaBlocks(versionRow.notes);
       const now = Date.now();
-      db.prepare("UPDATE ideas SET blocks_json = ?, updated_at = ? WHERE id = ?").run(
-        JSON.stringify(restoredBlocks), now, ideaId
-      );
+      const restoredBlocksJson = JSON.stringify(restoredBlocks);
       const restoredLabel = `복원-${versionRow.version_label}`;
-      const restoredInsert = db.prepare(
-        "INSERT INTO idea_versions (idea_id, version_label, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(ideaId, restoredLabel, JSON.stringify(restoredBlocks), ctx.user.id, now);
+      const restoredVersion = restoreIdeaVersionSnapshot(db, queries, {
+        ideaId,
+        restoredBlocksJson,
+        restoredLabel,
+        createdBy: ctx.user.id,
+        now,
+      });
       recordTeamEvent(ctx.session.teamId, ideaId, ctx.user.id, "version.restored", {
         from: versionRow.version_label,
         versionLabel: versionRow.version_label,
         versionId: versionRow.id,
         sourceVersionId: versionRow.id,
         sourceVersionLabel: versionRow.version_label,
-        restoredVersionId: queries.extractInsertId(restoredInsert),
+        restoredVersionId: restoredVersion.restoredVersionId,
         restoredVersionLabel: restoredLabel
       });
+      broadcastIdeaRefresh(ctx.session.teamId, ideaId, ctx.user.id, "version.restored");
       return json({ idea: toIdeaPayload(getIdeaForTeam(ideaId, ctx.session.teamId)) });
     }
 
@@ -1868,7 +2214,7 @@ async function handleRequest(request, slug, method) {
         .map((row) => ({
           id: row.id,
           type: row.event_type,
-          payload: JSON.parse(row.payload_json || "{}"),
+          payload: parseStoredJsonObject(row.payload_json),
           actor: row.user_name || "시스템",
           createdAt: row.created_at
         }));
@@ -1910,36 +2256,30 @@ async function handleRequest(request, slug, method) {
   if (s[0] === "notifications" && s[1] === "stream" && method === "GET") {
     const teamId = ctx.session.teamId;
     const clientId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    const clients = teamStreamSet(teamId);
+    const clients = getTeamStreamClients(teamId);
 
     let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
     const stream = new ReadableStream({
       start(controller) {
         const userInfo = { userId: ctx.user.id, name: ctx.user.name };
         clients.set(clientId, { controller, userId: ctx.user.id });
-        controller.enqueue(encoder.encode(`event: connected\ndata: ${JSON.stringify({ ok: true, teamId, user: userInfo })}\n\n`));
+        controller.enqueue(new TextEncoder().encode(`event: connected\ndata: ${JSON.stringify({ ok: true, teamId, user: userInfo })}\n\n`));
 
         keepAliveTimer = setInterval(() => {
           try {
-            controller.enqueue(encoder.encode(": ping\n\n"));
-          } catch (error) {
-            void error;
+            controller.enqueue(new TextEncoder().encode(": ping\n\n"));
+          } catch {
+            // client disconnected — expected during SSE teardown
           }
         }, 25000);
 
         request.signal.addEventListener("abort", () => {
           clearInterval(keepAliveTimer);
-          const teamClients = streamClients.get(teamId);
-          if (teamClients) {
-            teamClients.delete(clientId);
-            if (!teamClients.size) {
-              streamClients.delete(teamId);
-            }
-          }
+          removeTeamStreamClient(teamId, clientId);
           try {
             controller.close();
-          } catch (error) {
-            void error;
+          } catch {
+            // already closed — expected during SSE teardown
           }
         });
       }
@@ -1978,8 +2318,12 @@ async function handleRequest(request, slug, method) {
     return json({ mutedTypes: getMutedTypesForUser(ctx.user.id) });
   }
 
-  if (s[0] === "notifications" && s[1] === "preferences" && method === "PUT") {
-    const body = await readJsonBody(request);
+    if (s[0] === "notifications" && s[1] === "preferences" && method === "PUT") {
+      const rateLimitResponse = enforceMutationRateLimit(request, "notification-preferences", ctx.user.id);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
+      const body = await readJsonBody(request);
     const mutedTypes = Array.isArray(body.mutedTypes)
       ? [...new Set(body.mutedTypes.map((item) => String(item || "").trim()).filter(Boolean))]
       : [];
@@ -1999,7 +2343,7 @@ async function handleRequest(request, slug, method) {
         id: row.id,
         teamId: row.team_id,
         platform: row.platform,
-        webhookUrl: row.webhook_url,
+        webhookUrl: maskWebhookUrl(row.webhook_url),
         enabled: Boolean(row.enabled),
         createdBy: row.created_by,
         createdAt: row.created_at,
@@ -2009,7 +2353,7 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "integrations" && s[1] === "webhooks" && s[2] === "deliveries" && method === "GET") {
-    await processWebhookQueue();
+      await processWebhookQueue(db, formatNotificationMessage);
     const deliveries = db
       .prepare(
         `SELECT wd.*, tw.platform
@@ -2040,6 +2384,10 @@ async function handleRequest(request, slug, method) {
   if (s[0] === "integrations" && s[1] === "webhooks" && s[2] && method === "PUT") {
     if (!hasMinRole(ctx.session.teamId, ctx.user.id, "admin")) {
       return json({ error: "웹훅 수정 권한이 없습니다" }, 403);
+    }
+    const rateLimitResponse = enforceMutationRateLimit(request, "webhook-update", `${ctx.user.id}:${ctx.session.teamId}`);
+    if (rateLimitResponse) {
+      return rateLimitResponse;
     }
     const platform = normalizeText(s[2]).toLowerCase();
     if (!WEBHOOK_PLATFORMS.includes(platform)) {
@@ -2078,7 +2426,7 @@ async function handleRequest(request, slug, method) {
         id: webhook.id,
         teamId: webhook.team_id,
         platform: webhook.platform,
-        webhookUrl: webhook.webhook_url,
+        webhookUrl: maskWebhookUrl(webhook.webhook_url),
         enabled: Boolean(webhook.enabled),
         createdBy: webhook.created_by,
         createdAt: webhook.created_at,
@@ -2088,6 +2436,9 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "views" && s.length === 2 && method === "GET") {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "viewer")) {
+      return json({ error: "권한이 없습니다" }, 403);
+    }
     const rows = db
       .prepare(
         `SELECT v.id, v.team_id, v.name, v.config_json, v.created_by, v.updated_by, v.created_at, v.updated_at,
@@ -2104,13 +2455,7 @@ async function handleRequest(request, slug, method) {
       .all(ctx.session.teamId);
     return json({
       views: rows.map((row) => {
-        let config = {};
-        try {
-          config = JSON.parse(row.config_json || "{}");
-        } catch (error) {
-          void error;
-          config = {};
-        }
+        const config = parseStoredJsonObject(row.config_json);
         return {
           id: row.id,
           teamId: row.team_id,
@@ -2129,12 +2474,19 @@ async function handleRequest(request, slug, method) {
   }
 
   if (s[0] === "workspace" && s[1] === "views" && s.length === 2 && method === "POST") {
+    if (!hasMinRole(ctx.session.teamId, ctx.user.id, "editor")) {
+      return json({ error: "권한이 없습니다" }, 403);
+    }
+    const rateLimitResponse = enforceMutationRateLimit(request, "workspace-view-create", `${ctx.user.id}:${ctx.session.teamId}`);
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
     const body = await readJsonBody(request);
     const name = normalizeText(body.name);
     if (!name) {
       return json({ error: "이름은 필수입니다" }, 400);
     }
-    const config = typeof body.config === "object" && body.config ? body.config : {};
+    const config = normalizeWorkspaceViewConfig(body.config);
     const now = Date.now();
     const existing = db.prepare("SELECT id FROM workspace_views WHERE team_id = ? AND name = ?").get(ctx.session.teamId, name);
     if (existing) {
@@ -2200,6 +2552,27 @@ async function handleRequest(request, slug, method) {
   }
 
     return json({ error: "요청한 리소스를 찾을 수 없습니다" }, 404);
+  } catch (error) {
+    if (error instanceof RequestValidationError) {
+      if (error.status === 403 || error.status === 415 || error.status === 429) {
+        let requestPath = "";
+        try {
+          requestPath = new URL(request.url).pathname;
+        } catch {
+          // ignore
+        }
+        reportServerIssue("api", "request rejected", {
+          status: error.status,
+          message: error.message,
+          method,
+          path: requestPath,
+          slug
+        });
+      }
+      return json({ error: error.message }, error.status);
+    }
+    throw error;
+  }
 }
 
 export async function GET(request, context) {
