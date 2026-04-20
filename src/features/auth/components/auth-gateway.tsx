@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { ComponentProps } from "react";
 import type { AuthMode, LoginForm, RegisterForm } from "@/shared/types";
 import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/components/ui/card";
@@ -12,8 +12,8 @@ type AuthGatewayProps = {
   setLoginForm: (updater: (prev: LoginForm) => LoginForm) => void;
   registerForm: RegisterForm;
   setRegisterForm: (updater: (prev: RegisterForm) => RegisterForm) => void;
-  handleLogin: (event: FormEvent<HTMLFormElement>) => void;
-  handleRegister: (event: FormEvent<HTMLFormElement>) => void;
+  handleLogin: (event: Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0]) => void;
+  handleRegister: (event: Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0]) => void;
   error: string;
 };
 

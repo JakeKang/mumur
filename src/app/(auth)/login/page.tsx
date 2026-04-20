@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentProps } from "react";
 import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/components/ui/card";
 import { Input } from "@/shared/components/ui/input";
 import { useApiClient } from "@/shared/hooks/use-api-client";
 
+const PASSWORD_POLICY_HINT = "10자 이상, 영문자와 숫자를 포함해야 합니다.";
+
 export default function LoginPage() {
+  type FormSubmitEvent = Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0];
   const api = useApiClient();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [busy, setBusy] = useState(false);
@@ -35,7 +38,7 @@ export default function LoginPage() {
     };
   }, [api]);
 
-  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: FormSubmitEvent) => {
     event.preventDefault();
     setBusy(true);
     setError("");
@@ -52,7 +55,7 @@ export default function LoginPage() {
     }
   };
 
-  const handleRegister = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleRegister = async (event: FormSubmitEvent) => {
     event.preventDefault();
     setBusy(true);
     setError("");
@@ -148,9 +151,11 @@ export default function LoginPage() {
                   placeholder="비밀번호"
                   value={registerForm.password}
                   onChange={(event) => setRegisterForm((prev) => ({ ...prev, password: event.target.value }))}
-                  minLength={6}
+                  minLength={10}
+                  autoComplete="new-password"
                   required
                 />
+                <p className="text-xs text-[var(--muted)]">{PASSWORD_POLICY_HINT}</p>
                 <Input
                   placeholder="워크스페이스 이름"
                   value={registerForm.teamName}

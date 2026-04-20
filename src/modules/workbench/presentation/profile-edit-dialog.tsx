@@ -85,7 +85,8 @@ export function ProfileEditDialog({
                 type="password"
                 value={newPassword}
                 onChange={(e) => onChangeNewPassword(e.target.value)}
-                placeholder="8자 이상"
+                placeholder="10자 이상, 영문자와 숫자 포함"
+                minLength={10}
                 autoComplete="new-password"
               />
             </div>
