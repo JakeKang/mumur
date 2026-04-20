@@ -50,9 +50,11 @@ export type Idea = {
   title: string;
   category: string;
   status: IdeaStatus;
+  priority?: "low" | "medium" | "high";
   blocks: Block[];
   createdAt: number;
   updatedAt: number;
+  baseUpdatedAt?: number;
   commentCount?: number;
   reactionCount?: number;
   versionCount?: number;
@@ -128,14 +130,29 @@ export type WorkspaceMember = {
 export type WorkspaceInvitation = {
   id: number;
   workspaceId: number;
+  teamId?: number;
   email: string;
   role: WorkspaceRole;
-  status: "pending" | "accepted" | "canceled";
+  status: "pending" | "accepted" | "cancelled" | "canceled";
   message: string | null;
   invitedBy: number;
   invitedByName?: string;
+  resolvedBy?: number | null;
+  resolvedByName?: string;
+  teamName?: string;
+  teamIcon?: string;
+  teamColor?: string;
   createdAt: number;
   updatedAt: number;
+};
+
+export type WorkspaceInvitationPreview = {
+  email: string;
+  registered: boolean;
+  userId: number | null;
+  name: string | null;
+  memberRole: WorkspaceRole | null;
+  invitation: WorkspaceInvitation | null;
 };
 
 export type WorkspaceMe = {
@@ -177,10 +194,14 @@ export type TeamMemberForm = WorkspaceMemberForm;
 
 export type Notification = {
   id: number;
+  teamId?: number;
+  ideaId?: number | null;
   type: string;
   payload: Record<string, unknown> | null;
   read: boolean;
   createdAt: number;
+  actor?: string;
+  message?: string;
 };
 
 export type NotificationFilters = {
@@ -267,7 +288,7 @@ export type ConfirmDialogState = {
   description: string;
   confirmText: string;
   danger: boolean;
-  action: (() => void) | null;
+  action: (() => void | Promise<void>) | null;
 };
 
 export type VersionForm = {

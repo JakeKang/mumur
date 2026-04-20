@@ -76,9 +76,16 @@ export function notificationTypeLabel(type: string) {
     "idea.created": "아이디어 등록",
     "idea.updated": "아이디어 수정",
     "idea.deleted": "아이디어 삭제",
-    "team.member.left": "팀 탈퇴"
+    "team.member.left": "팀 탈퇴",
+    "team.invitation.pending": "팀 초대 발송",
+    "team.invitation.accepted": "팀 초대 수락",
+    "team.invitation.cancelled": "팀 초대 취소"
   };
   return labels[type] || type;
+}
+
+export function notificationReadLabel(read: boolean) {
+  return read ? "읽음" : "읽지 않음";
 }
 
 export function activityTypeLabel(type: string) {
@@ -98,7 +105,10 @@ export function timelineEventLabel(type: string) {
     "version.created": "기획서 버전 등록",
     "version.restored": "타임라인 복원",
     "mention.created": "멘션",
-    "team.member.left": "팀 탈퇴"
+    "team.member.left": "팀 탈퇴",
+    "team.invitation.pending": "팀 초대 발송",
+    "team.invitation.accepted": "팀 초대 수락",
+    "team.invitation.cancelled": "팀 초대 취소"
   };
   return labels[type] || type;
 }
