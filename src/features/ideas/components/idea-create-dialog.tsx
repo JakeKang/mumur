@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { ComponentProps } from "react";
 import type { IdeaStatus, NewIdeaForm } from "@/shared/types";
 import { STATUS_META as STATUS_META_DEFAULT } from "@/features/ideas/constants/idea-status";
 import { Button } from "@/shared/components/ui/button";
@@ -13,7 +13,7 @@ type IdeaCreateDialogProps = {
   STATUS_META: typeof STATUS_META_DEFAULT;
   newIdeaForm: NewIdeaForm;
   setNewIdeaForm: (updater: (prev: NewIdeaForm) => NewIdeaForm) => void;
-  handleCreateIdea: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  handleCreateIdea: (event: Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0]) => Promise<void>;
 };
 
 export function IdeaCreateDialog({ open, onClose, busy, IDEA_STATUS, STATUS_META, newIdeaForm, setNewIdeaForm, handleCreateIdea }: IdeaCreateDialogProps) {

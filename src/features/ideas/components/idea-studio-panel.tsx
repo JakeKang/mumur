@@ -1,16 +1,78 @@
-import { useEffect, useMemo, useState } from "react";
-import { Badge } from "@/shared/components/ui/badge";
+import { useEffect, useMemo, useState, type ComponentProps, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { MentionAssistPanel } from "@/features/ideas/components/mention-assist-panel";
 import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent } from "@/shared/components/ui/card";
-import { categoryLabel, timelineEventLabel } from "@/shared/constants/ui-labels";
-import { ArrowLeft, MessageSquare, PanelRightClose, PanelRightOpen, ScrollText, SquarePen } from "lucide-react";
+import { timelineEventLabel } from "@/shared/constants/ui-labels";
+import { ArrowLeft, ScrollText, SquarePen } from "lucide-react";
+import {
+  applyMentionToDraft,
+  buildCommentContentParts,
+  buildMentionCandidates,
+  buildMentionUiState,
+  buildThreadedComments,
+  createMentionLookup,
+  previewFromVersion,
+  type IdeaStudioMentionCandidate,
+  type IdeaStudioMentionCandidateSource,
+  readRecentMentionEmails,
+  removeMentionTokenFromText,
+  writeRecentMentionEmails,
+} from "@/features/ideas/utils/idea-studio-helpers";
 import { useWorkbenchSessionContext } from "@/modules/workbench/presentation/contexts/workbench-contexts";
+import type { IdeaBlockPresence } from "@/modules/workbench/application/hooks/use-idea-detail-helpers";
 import { Input } from "@/shared/components/ui/input";
 import { BlockEditor } from "@/features/ideas/components/editor/BlockEditor";
+import type { Comment, Idea, IdeaVersion, TimelineEvent } from "@/shared/types";
 
 import { DrawerShell } from "@/shared/components/ui/drawer-shell";
 import { ConfirmDialog } from "@/shared/components/ui/confirm-dialog";
+
+type IdeaStudioStatusMeta = EditorPanelProps["STATUS_META"];
+
+type IdeaStudioVersionForm = {
+  versionLabel: string;
+  notes: string;
+};
+
+type EditorPanelProps = ComponentProps<typeof BlockEditor>;
+type FormSubmitEvent = Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0];
+
+type IdeaSavePatch = {
+  title?: string;
+  category?: string;
+  status?: string;
+  blocks?: Idea["blocks"];
+  priority?: string;
+};
+
+export type IdeaStudioPanelProps = {
+  selectedIdea: Idea | null;
+  onBackToList: () => void;
+  studioTab: string;
+  setStudioTab: Dispatch<SetStateAction<string>>;
+  STATUS_META: IdeaStudioStatusMeta;
+  handleSaveIdea: (event?: { preventDefault?: () => void } | null, patch?: IdeaSavePatch, context?: unknown) => Promise<void> | void;
+  blocks: Idea["blocks"];
+  handleCreateComment: (event: FormSubmitEvent, blockIdOverride?: string, contentOverride?: string, parentId?: number | null) => Promise<void> | void;
+  handleUpdateComment: (commentId: number, content: string) => Promise<void> | void;
+  handleDeleteComment: (commentId: number) => Promise<void> | void;
+  comments: Comment[];
+  commentFilterBlockId: string;
+  setCommentFilterBlockId: Dispatch<SetStateAction<string>>;
+  applyCommentFilter: () => Promise<void> | void;
+  reactionsByTarget: Record<string, { reactions: Array<{ emoji: string; count: number }>; mine: string[] }>;
+  handleReaction: (emoji: string, targetType?: string, targetId?: string) => Promise<void> | void;
+  handleCreateVersion: (event: FormSubmitEvent) => Promise<void> | void;
+  handleRestoreVersion: (versionId: number) => Promise<boolean>;
+  versionForm: IdeaStudioVersionForm;
+  setVersionForm: Dispatch<SetStateAction<IdeaStudioVersionForm>>;
+  versions: IdeaVersion[];
+  timeline: TimelineEvent[];
+  teamMembers: IdeaStudioMentionCandidateSource[];
+  handleUploadBlockFile: NonNullable<EditorPanelProps["onUploadFile"]>;
+  ideaPresence: IdeaBlockPresence[];
+  reportActiveBlock: NonNullable<EditorPanelProps["onActiveBlockChange"]>;
+};
 
 export function IdeaStudioPanel({
   selectedIdea,
@@ -19,14 +81,14 @@ export function IdeaStudioPanel({
   setStudioTab,
   STATUS_META,
   handleSaveIdea,
-  blocks,
+  blocks: _blocks,
   handleCreateComment,
   handleUpdateComment,
   handleDeleteComment,
   comments,
-  commentFilterBlockId,
+  commentFilterBlockId: _commentFilterBlockId,
   setCommentFilterBlockId,
-  applyCommentFilter,
+  applyCommentFilter: _applyCommentFilter,
   reactionsByTarget,
   handleReaction,
   handleCreateVersion,
@@ -36,8 +98,10 @@ export function IdeaStudioPanel({
   versions,
   timeline,
   teamMembers,
-  handleUploadBlockFile
-}) {
+  handleUploadBlockFile,
+  ideaPresence,
+  reportActiveBlock
+}: IdeaStudioPanelProps) {
   const { teamMe, canEditIdea, formatTime } = useWorkbenchSessionContext();
   const myRole = teamMe?.role ?? null;
   const currentUserId = teamMe?.userId ?? null;
@@ -45,11 +109,15 @@ export function IdeaStudioPanel({
   const [editingCommentDraft, setEditingCommentDraft] = useState("");
   const [deleteCommentId, setDeleteCommentId] = useState<number | null>(null);
   const [commentMentionIndex, setCommentMentionIndex] = useState(0);
+  const [blockCommentMentionIndex, setBlockCommentMentionIndex] = useState(0);
+  const [replyMentionIndex, setReplyMentionIndex] = useState(0);
   const [blockCommentPanelOpen, setBlockCommentPanelOpen] = useState(false);
   const [blockCommentPanelBlockId, setBlockCommentPanelBlockId] = useState<string>("");
   const [globalCommentPanelOpen, setGlobalCommentPanelOpen] = useState(false);
   const [globalCommentDraft, setGlobalCommentDraft] = useState("");
   const [blockCommentDraft, setBlockCommentDraft] = useState("");
+  const [replyingToCommentId, setReplyingToCommentId] = useState<number | null>(null);
+  const [replyDraft, setReplyDraft] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<null | {
     versionId: number;
     label: string;
@@ -58,44 +126,11 @@ export function IdeaStudioPanel({
   }>(null);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreRevision, setRestoreRevision] = useState(0);
-  const [recentMentionEmails, setRecentMentionEmails] = useState(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-    try {
-      const raw = window.localStorage.getItem("mumur.mentions.recentEmails");
-      if (!raw) {
-        return [];
-      }
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.map((item) => String(item).toLowerCase()) : [];
-    } catch {
-      return [];
-    }
-  });
-  const mentionCandidates = useMemo(() => {
-    return Array.isArray(teamMembers)
-      ? teamMembers.map((member) => ({
-          userId: member.userId,
-          name: member.name,
-          email: member.email,
-          role: member.role || "member",
-          initials: String(member.name || "?")
-            .split(" ")
-            .filter(Boolean)
-            .slice(0, 2)
-            .map((part) => part[0]?.toUpperCase() || "")
-            .join("") || "?",
-          nameToken: String(member.name || "").replace(/\s+/g, "").toLowerCase()
-        }))
-      : [];
-  }, [teamMembers]);
+  const [recentMentionEmails, setRecentMentionEmails] = useState(() => readRecentMentionEmails());
+  const mentionCandidates = useMemo(() => buildMentionCandidates(teamMembers), [teamMembers]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    window.localStorage.setItem("mumur.mentions.recentEmails", JSON.stringify(recentMentionEmails));
+    writeRecentMentionEmails(recentMentionEmails);
   }, [recentMentionEmails]);
 
 
@@ -121,84 +156,22 @@ export function IdeaStudioPanel({
     return "low";
   }, [selectedIdea]);
 
-  const mentionTokenFromText = (value) => {
-    const text = String(value || "");
-    const match = text.match(/(^|\s)@([^\s@]*)$/);
-    return match ? match[2].toLowerCase() : "";
-  };
-
-  const extractMentionTokens = (value) => {
-    const text = String(value || "");
-    const matches = text.match(/@([^\s@]+)/g) || [];
-    return [...new Set(matches.map((item) => item.slice(1).toLowerCase()))];
-  };
-
   const mentionLookup = useMemo(() => {
-    const map = new Map();
-    mentionCandidates.forEach((member) => {
-      map.set(member.email.toLowerCase(), member);
-      if (!map.has(member.nameToken)) {
-        map.set(member.nameToken, member);
-      }
-    });
-    return map;
+    return createMentionLookup(mentionCandidates);
   }, [mentionCandidates]);
 
-  const hasMentionContextFromText = (value) => {
-    const text = String(value || "");
-    return /(^|\s)@([^\s@]*)$/.test(text);
-  };
-
-  const mentionMatches = (token, hasContext) => {
-    if (!hasContext) {
-      return [];
-    }
-    const normalizedToken = String(token || "").toLowerCase();
-    const recentRank = new Map(recentMentionEmails.map((email, index) => [email, index]));
-    return mentionCandidates
-      .filter((member) => {
-        if (!normalizedToken) {
-          return true;
-        }
-        return member.email.toLowerCase().includes(normalizedToken) || member.nameToken.includes(normalizedToken);
-      })
-      .sort((a, b) => {
-        const aEmail = a.email.toLowerCase();
-        const bEmail = b.email.toLowerCase();
-        const aRecent = recentRank.has(aEmail) ? recentRank.get(aEmail) : Number.MAX_SAFE_INTEGER;
-        const bRecent = recentRank.has(bEmail) ? recentRank.get(bEmail) : Number.MAX_SAFE_INTEGER;
-        if (aRecent !== bRecent) {
-          return aRecent - bRecent;
-        }
-        if (normalizedToken) {
-          const aPrefix = aEmail.startsWith(normalizedToken) || a.nameToken.startsWith(normalizedToken) ? 0 : 1;
-          const bPrefix = bEmail.startsWith(normalizedToken) || b.nameToken.startsWith(normalizedToken) ? 0 : 1;
-          if (aPrefix !== bPrefix) {
-            return aPrefix - bPrefix;
-          }
-        }
-        return String(a.name || "").localeCompare(String(b.name || ""));
-      })
-      .slice(0, 6);
-  };
-
-  const commentMentionToken = mentionTokenFromText(globalCommentDraft);
-  const commentMentionContext = hasMentionContextFromText(globalCommentDraft);
-  const commentMentionMatches = mentionMatches(commentMentionToken, commentMentionContext);
-  const mentionPreviewMembers = (value) => {
-    const tokens = extractMentionTokens(value);
-    const collected = [];
-    const seen = new Set();
-    tokens.forEach((token) => {
-      const member = mentionLookup.get(token);
-      if (member && !seen.has(member.userId)) {
-        seen.add(member.userId);
-        collected.push(member);
-      }
-    });
-    return collected;
-  };
-  const commentMentionPreview = mentionPreviewMembers(globalCommentDraft);
+  const commentMentionState = useMemo(
+    () => buildMentionUiState("comment", globalCommentDraft, commentMentionIndex, mentionCandidates, recentMentionEmails, mentionLookup),
+    [commentMentionIndex, globalCommentDraft, mentionCandidates, mentionLookup, recentMentionEmails]
+  );
+  const blockCommentMentionState = useMemo(
+    () => buildMentionUiState("block-comment", blockCommentDraft, blockCommentMentionIndex, mentionCandidates, recentMentionEmails, mentionLookup),
+    [blockCommentDraft, blockCommentMentionIndex, mentionCandidates, mentionLookup, recentMentionEmails]
+  );
+  const replyMentionState = useMemo(
+    () => buildMentionUiState("reply", replyDraft, replyMentionIndex, mentionCandidates, recentMentionEmails, mentionLookup),
+    [mentionCandidates, mentionLookup, recentMentionEmails, replyDraft, replyMentionIndex]
+  );
 
   const globalComments = useMemo(
     () => comments.filter((c) => !c.blockId || c.blockId === "").sort((a, b) => Number(b.createdAt) - Number(a.createdAt)),
@@ -209,47 +182,52 @@ export function IdeaStudioPanel({
     () => comments.filter((c) => c.blockId === blockCommentPanelBlockId).sort((a, b) => Number(b.createdAt) - Number(a.createdAt)),
     [comments, blockCommentPanelBlockId]
   );
+  const globalCommentThreads = useMemo(() => buildThreadedComments(globalComments), [globalComments]);
+  const blockCommentThreads = useMemo(() => buildThreadedComments(blockComments), [blockComments]);
 
-  const activeCommentMentionIndex = commentMentionMatches.length
-    ? Math.min(commentMentionIndex, commentMentionMatches.length - 1)
-    : 0;
-  const commentMentionListboxId = "comment-mention-listbox";
-  const commentMentionStatusId = "comment-mention-status";
-  const activeCommentMentionOptionId = commentMentionMatches[activeCommentMentionIndex]
-    ? `comment-mention-option-${commentMentionMatches[activeCommentMentionIndex].userId}`
-    : undefined;
-  const commentMentionAnnouncement = commentMentionMatches.length
-    ? `${commentMentionMatches.length}개의 멘션 추천이 있습니다. 현재 선택 ${activeCommentMentionIndex + 1}번.`
-    : "멘션 추천이 없습니다.";
-
-  const applyMention = (setter, currentValue, email) => {
-    const normalizedEmail = String(email || "").toLowerCase();
-    const updated = String(currentValue || "").replace(/(^|\s)@([^\s@]*)$/, `$1@${email} `);
-    setRecentMentionEmails((prev) => [normalizedEmail, ...prev.filter((item) => item !== normalizedEmail)].slice(0, 12));
-    setter(updated);
+  const renderCommentContent = (content: unknown) => {
+    const parts = buildCommentContentParts(content, mentionLookup);
+    return (
+      <span className="whitespace-pre-wrap break-words">
+        {parts.map((part) => part.type === "text"
+          ? <span key={part.key}>{part.text}</span>
+          : (
+              <span
+                key={part.key}
+                className="mx-0.5 inline-flex max-w-full items-center rounded-full border border-[var(--accent)]/25 bg-[var(--accent)]/10 px-1.5 py-0.5 align-baseline text-xs font-medium text-[var(--accent)]"
+                title={part.title}
+              >
+                <span className="truncate">{part.label}</span>
+              </span>
+            ))}
+      </span>
+    );
   };
 
-  const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-  const removeMentionTokenFromText = (value, token) => {
-    const normalizedToken = String(token || "").trim();
-    if (!normalizedToken) {
-      return String(value || "");
+  const applyMention = (setter: Dispatch<SetStateAction<string>>, currentValue: string, member: IdeaStudioMentionCandidate) => {
+    const nextMention = applyMentionToDraft(currentValue, member);
+    if (!nextMention) {
+      return;
     }
-    const pattern = new RegExp(`(^|\\s)@${escapeRegex(normalizedToken)}(?=\\s|$)`, "gi");
-    return String(value || "")
-      .replace(pattern, " ")
-      .replace(/\s{2,}/g, " ")
-      .trimStart();
+    setRecentMentionEmails((prev) => [nextMention.normalizedEmail, ...prev.filter((item) => item !== nextMention.normalizedEmail)].slice(0, 12));
+    setter(nextMention.value);
   };
 
-  const removeMention = (setter, currentValue, member) => {
+  const removeMention = (setter: Dispatch<SetStateAction<string>>, currentValue: string, member: IdeaStudioMentionCandidate) => {
     let nextValue = removeMentionTokenFromText(currentValue, member.email);
     nextValue = removeMentionTokenFromText(nextValue, member.nameToken);
+    nextValue = removeMentionTokenFromText(nextValue, member.legacyNameToken);
     setter(nextValue);
   };
 
-  const handleMentionKeyDown = (event, matches, activeIndex, setActiveIndex, setter, value) => {
+  const handleMentionKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+    matches: IdeaStudioMentionCandidate[],
+    activeIndex: number,
+    setActiveIndex: Dispatch<SetStateAction<number>>,
+    setter: Dispatch<SetStateAction<string>>,
+    value: string
+  ) => {
     if (!matches.length) {
       return;
     }
@@ -267,7 +245,7 @@ export function IdeaStudioPanel({
       event.preventDefault();
       const target = matches[activeIndex] || matches[0];
       if (target) {
-        applyMention(setter, value, target.email);
+        applyMention(setter, value, target);
       }
       return;
     }
@@ -275,25 +253,6 @@ export function IdeaStudioPanel({
       event.preventDefault();
       setActiveIndex(0);
     }
-  };
-
-  const previewFromVersion = (version) => {
-    const raw = String(version?.notes || "").trim();
-    if (!raw) {
-      return "저장된 블록 미리보기가 없습니다.";
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const text = parsed
-          .map((block) => String(block?.content || "").trim())
-          .filter(Boolean)
-          .slice(0, 3)
-          .join("\n");
-        return text || "본문 텍스트가 없는 스냅샷입니다.";
-      }
-    } catch {}
-    return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
   };
 
   return (
@@ -359,7 +318,6 @@ export function IdeaStudioPanel({
                     <option value="medium">🟡 중간</option>
                     <option value="high">🔴 높음</option>
                   </select>
-                  <span className="hidden text-xs text-[var(--muted)] xl:block">수정 {formatTime(selectedIdea.updatedAt)}</span>
                 </div>
               </div>
 
@@ -405,97 +363,31 @@ export function IdeaStudioPanel({
                 readOnly={isReadOnly}
                 STATUS_META={STATUS_META}
                 formatTime={formatTime}
-                onSaveBlocks={async (editorBlocks) => {
+                onSaveDocument={async (title, editorBlocks, context) => {
                   const blocks = editorBlocks.map((b) => ({
                     id: b.id,
                     type: b.type,
                     content: b.content,
                     checked: b.checked ?? false,
                   }));
-                  await handleSaveIdea(null, { blocks });
-                }}
-                onSaveTitle={async (title) => {
-                  await handleSaveIdea(null, { title });
+                  await handleSaveIdea(null, { title, blocks }, context);
                 }}
                 onUploadFile={handleUploadBlockFile}
                 onOpenBlockComments={(blockId) => {
                   setBlockCommentPanelBlockId(blockId);
                   setBlockCommentPanelOpen(true);
                   setBlockCommentDraft("");
+                  setBlockCommentMentionIndex(0);
                 }}
                 onBlockReaction={async (blockId, emoji) => {
                   await handleReaction(emoji, "block", blockId);
                 }}
+                onOpenDocumentComments={() => setGlobalCommentPanelOpen((prev) => !prev)}
+                globalCommentCount={globalComments.length}
+                ideaPresence={ideaPresence}
+                currentUserId={currentUserId}
+                onActiveBlockChange={reportActiveBlock}
               />
-            ) : null}
-
-            {studioTab === "editor" ? (
-              <section className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-[var(--foreground)]">전체 댓글</p>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-[var(--muted)]">{globalComments.length}개</span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-7 gap-1.5 px-2 text-xs"
-                      onClick={() => setGlobalCommentPanelOpen((prev) => !prev)}
-                      aria-expanded={globalCommentPanelOpen}
-                      aria-controls="global-comment-thread-panel"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5" />
-                      문서 댓글 스레드
-                      {globalCommentPanelOpen ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
-                    </Button>
-                  </div>
-                </div>
-                {!isReadOnly ? (
-                  <form
-                    className="flex gap-2"
-                    onSubmit={async (event) => {
-                      if (!globalCommentDraft.trim()) {
-                        event.preventDefault();
-                        return;
-                      }
-                      await handleCreateComment(event, "", globalCommentDraft);
-                      setGlobalCommentDraft("");
-                      setCommentMentionIndex(0);
-                    }}
-                  >
-                    <Input
-                      value={globalCommentDraft}
-                      placeholder="댓글 입력..."
-                      aria-label="댓글 입력"
-                      onChange={(event) => {
-                        setGlobalCommentDraft(event.target.value);
-                        setCommentMentionIndex(0);
-                      }}
-                    />
-                    <Button type="submit" size="sm" disabled={!globalCommentDraft.trim()}>등록</Button>
-                  </form>
-                ) : null}
-                <p className="text-xs text-[var(--muted)]">블록 댓글은 블록의 💬 버튼에서, 문서 전체 댓글은 “문서 댓글 스레드”에서 관리합니다.</p>
-                {globalComments.length ? (
-                  <div className="space-y-1 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
-                    {globalComments.slice(0, 2).map((comment) => (
-                      <div key={`global-preview-${comment.id}`} className="rounded px-1.5 py-1 text-xs text-[var(--foreground)]">
-                        <span className="mr-1 font-semibold">{comment.userName}:</span>
-                        <span>{comment.content}</span>
-                      </div>
-                    ))}
-                    {globalComments.length > 2 ? (
-                      <button
-                        type="button"
-                        className="px-1.5 text-[11px] text-[var(--accent)] hover:underline"
-                        onClick={() => setGlobalCommentPanelOpen(true)}
-                      >
-                        댓글 {globalComments.length - 2}개 더 보기
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </section>
             ) : null}
 
             {studioTab === "docs" ? (
@@ -527,14 +419,15 @@ export function IdeaStudioPanel({
                 {timeline.length ? (
                   timeline.map((event) => {
                     const payload = event?.payload || {};
-                    const createdLabel = event.type === "version.created" ? String(payload?.versionLabel || "") : "";
-                    const sourceLabel = event.type === "version.restored"
+                    const eventType = event.eventType;
+                    const createdLabel = eventType === "version.created" ? String(payload?.versionLabel || "") : "";
+                    const sourceLabel = eventType === "version.restored"
                       ? String(payload?.sourceVersionLabel || payload?.versionLabel || payload?.from || "")
                       : "";
-                    const restoredLabel = event.type === "version.restored" ? String(payload?.restoredVersionLabel || "") : "";
+                    const restoredLabel = eventType === "version.restored" ? String(payload?.restoredVersionLabel || "") : "";
                     const restoreLabel = sourceLabel || createdLabel;
                     const payloadVersionId = Number(
-                      event.type === "version.restored" ? (payload?.sourceVersionId ?? payload?.versionId) : payload?.versionId
+                      eventType === "version.restored" ? (payload?.sourceVersionId ?? payload?.versionId) : payload?.versionId
                     );
                     const restoreVersionById = Number.isInteger(payloadVersionId) && payloadVersionId > 0
                       ? versions.find((version) => Number(version.id) === payloadVersionId)
@@ -544,16 +437,16 @@ export function IdeaStudioPanel({
                       : [];
                     const hasAmbiguousFallback = !restoreVersionById && fallbackMatches.length > 1;
                     const restoreVersion = restoreVersionById || fallbackMatches[0] || null;
-                    const isRestoredSnapshot = event.type === "version.created" && createdLabel.startsWith("복원-");
+                    const isRestoredSnapshot = eventType === "version.created" && createdLabel.startsWith("복원-");
 
                     return (
                       <div key={event.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-2">
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <p className="font-medium">{timelineEventLabel(event.type)}</p>
-                            <p className="text-xs text-[var(--muted)]">{event.actor}</p>
+                            <p className="font-medium">{timelineEventLabel(eventType)}</p>
+                            <p className="text-xs text-[var(--muted)]">{event.actorName || "알 수 없음"}</p>
                             <p className="text-xs text-[var(--muted)]">{formatTime(event.createdAt)}</p>
-                            {event.type === "version.created" && createdLabel ? (
+                            {eventType === "version.created" && createdLabel ? (
                               <div className="mt-1 flex items-center gap-1.5">
                                 <span className={`rounded px-1.5 py-0.5 text-[10px] ${isRestoredSnapshot ? "bg-amber-100 text-amber-700" : "bg-[var(--surface-strong)] text-[var(--muted)]"}`}>
                                   {isRestoredSnapshot ? "복원본" : "스냅샷"}
@@ -561,7 +454,7 @@ export function IdeaStudioPanel({
                                 <p className="text-xs text-[var(--muted)]">{createdLabel}</p>
                               </div>
                             ) : null}
-                            {event.type === "version.restored" && sourceLabel ? (
+                            {eventType === "version.restored" && sourceLabel ? (
                               <div className="mt-1 space-y-0.5">
                                 <p className="text-xs text-[var(--muted)]">원본: {sourceLabel}</p>
                                 {restoredLabel ? <p className="text-xs text-[var(--muted)]">복원본: {restoredLabel}</p> : null}
@@ -613,6 +506,9 @@ export function IdeaStudioPanel({
           setGlobalCommentPanelOpen(false);
           setCommentMentionIndex(0);
           setGlobalCommentDraft("");
+          setReplyingToCommentId(null);
+          setReplyMentionIndex(0);
+          setReplyDraft("");
         }}
         widthClass="max-w-lg"
       >
@@ -637,10 +533,10 @@ export function IdeaStudioPanel({
                   aria-label="문서 댓글 입력"
                   aria-haspopup="listbox"
                   aria-autocomplete="list"
-                  aria-expanded={commentMentionMatches.length > 0}
-                  aria-controls={commentMentionMatches.length ? commentMentionListboxId : undefined}
-                  aria-activedescendant={commentMentionMatches.length ? activeCommentMentionOptionId : undefined}
-                  aria-describedby={commentMentionMatches.length ? commentMentionStatusId : undefined}
+                  aria-expanded={commentMentionState.matches.length > 0}
+                  aria-controls={commentMentionState.matches.length ? commentMentionState.listboxId : undefined}
+                  aria-activedescendant={commentMentionState.matches.length ? commentMentionState.activeOptionId : undefined}
+                  aria-describedby={commentMentionState.matches.length ? commentMentionState.statusId : undefined}
                   onChange={(event) => {
                     setGlobalCommentDraft(event.target.value);
                     setCommentMentionIndex(0);
@@ -648,8 +544,8 @@ export function IdeaStudioPanel({
                   onKeyDown={(event) =>
                     handleMentionKeyDown(
                       event,
-                      commentMentionMatches,
-                      activeCommentMentionIndex,
+                      commentMentionState.matches,
+                      commentMentionState.activeIndex,
                       setCommentMentionIndex,
                       setGlobalCommentDraft,
                       globalCommentDraft
@@ -658,18 +554,18 @@ export function IdeaStudioPanel({
                   required
                 />
                 <MentionAssistPanel
-                  matches={commentMentionMatches}
-                  activeIndex={activeCommentMentionIndex}
+                  matches={commentMentionState.matches}
+                  activeIndex={commentMentionState.activeIndex}
                   setActiveIndex={setCommentMentionIndex}
                   applyMention={applyMention}
                   draft={globalCommentDraft}
                   setDraft={setGlobalCommentDraft}
-                  preview={commentMentionPreview}
+                  preview={commentMentionState.preview}
                   removeMention={removeMention}
-                  statusId={commentMentionStatusId}
-                  listboxId={commentMentionListboxId}
-                  activeOptionId={activeCommentMentionOptionId}
-                  announcement={commentMentionAnnouncement}
+                  statusId={commentMentionState.statusId}
+                  listboxId={commentMentionState.listboxId}
+                  activeOptionId={commentMentionState.activeOptionId}
+                  announcement={commentMentionState.announcement}
                   helpId="comment-mention-help"
                   helpText=""
                   listboxLabel="문서 댓글 멘션 후보"
@@ -681,107 +577,228 @@ export function IdeaStudioPanel({
           )}
 
           <div className="space-y-2">
-            {globalComments.length ? (
-              globalComments.map((comment) => (
-                <div
-                  key={comment.id}
-                  className="group rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 transition-all duration-150 hover:border-[var(--border)]/60 hover:shadow-sm"
-                >
-                  <div className="mb-1.5 flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-strong)] text-xs font-semibold text-[var(--foreground)]">
-                        {(comment.userName || "?")[0].toUpperCase()}
-                      </span>
-                      <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
-                    </div>
-                    <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-                      <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
-                      {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
-                        <>
-                          <button
-                            type="button"
-                            className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
-                            onClick={() => {
-                              setEditingCommentId(comment.id);
-                              setEditingCommentDraft(comment.content || "");
-                            }}
-                          >
-                            수정
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
-                            onClick={() => setDeleteCommentId(comment.id)}
-                          >
-                            삭제
-                          </button>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  {editingCommentId === comment.id ? (
-                    <div className="space-y-2">
-                      <Input
-                        value={editingCommentDraft}
-                        onChange={(event) => setEditingCommentDraft(event.target.value)}
-                        placeholder="댓글 수정"
-                      />
-                      <div className="flex gap-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          onClick={async () => {
-                            const next = editingCommentDraft.trim();
-                            if (!next) return;
-                            await handleUpdateComment(comment.id, next);
-                            setEditingCommentId(null);
-                            setEditingCommentDraft("");
-                          }}
-                        >
-                          저장
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            setEditingCommentId(null);
-                            setEditingCommentDraft("");
-                          }}
-                        >
-                          취소
-                        </Button>
+            {globalCommentThreads.length ? (
+              globalCommentThreads.map(({ comment, replies }) => (
+                <div key={comment.id}>
+                  <div className="group rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 transition-all duration-150 hover:border-[var(--border)]/60 hover:shadow-sm">
+                    <div className="mb-1.5 flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface-strong)] text-xs font-semibold text-[var(--foreground)]">
+                          {(comment.userName || "?")[0].toUpperCase()}
+                        </span>
+                        <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                        <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
+                        {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
+                          <>
+                            <button
+                              type="button"
+                              className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
+                              onClick={() => {
+                                setEditingCommentId(comment.id);
+                                setEditingCommentDraft(comment.content || "");
+                              }}
+                            >
+                              수정
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                              onClick={() => setDeleteCommentId(comment.id)}
+                            >
+                              삭제
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                     </div>
-                  ) : (
-                    <p className="text-sm leading-relaxed text-[var(--foreground)]">{comment.content}</p>
-                  )}
 
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {["👍", "🔥", "✅"].map((emoji) => {
-                      const targetId = `idea:${comment.id}`;
-                      const key = `comment:${targetId}`;
-                      const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
-                      const item = (summary.reactions || []).find((row) => row.emoji === emoji);
-                      const mine = (summary.mine || []).includes(emoji);
-                      return (
+                    {editingCommentId === comment.id ? (
+                      <div className="space-y-2">
+                        <Input
+                          value={editingCommentDraft}
+                          onChange={(event) => setEditingCommentDraft(event.target.value)}
+                          placeholder="댓글 수정"
+                        />
+                        <div className="flex gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={async () => {
+                              const next = editingCommentDraft.trim();
+                              if (!next) return;
+                              await handleUpdateComment(comment.id, next);
+                              setEditingCommentId(null);
+                              setEditingCommentDraft("");
+                            }}
+                          >
+                            저장
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingCommentId(null);
+                              setEditingCommentDraft("");
+                            }}
+                          >
+                            취소
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm leading-relaxed text-[var(--foreground)]">{renderCommentContent(comment.content)}</p>
+                    )}
+
+                    <div className="mt-2 flex flex-wrap items-center gap-1">
+                      {["👍", "🔥", "✅"].map((emoji) => {
+                        const targetId = `idea:${comment.id}`;
+                        const key = `comment:${targetId}`;
+                        const summary = reactionsByTarget?.[key] || { reactions: [], mine: [] };
+                        const item = (summary.reactions || []).find((row) => row.emoji === emoji);
+                        const mine = (summary.mine || []).includes(emoji);
+                        return (
+                          <button
+                            key={`comment-reaction-${comment.id}-${emoji}`}
+                            type="button"
+                            disabled={isReadOnly}
+                            onClick={() => handleReaction(emoji, "comment", targetId)}
+                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
+                              mine
+                                ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+                                : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)]/40"
+                            }`}
+                          >
+                            {emoji} {item?.count || 0}
+                          </button>
+                        );
+                      })}
+                      {!isReadOnly ? (
                         <button
-                          key={`comment-reaction-${comment.id}-${emoji}`}
                           type="button"
-                          disabled={isReadOnly}
-                          onClick={() => handleReaction(emoji, "comment", targetId)}
-                          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
-                            mine
-                              ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
-                              : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)]/40"
-                          }`}
+                          className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--accent)] transition"
+                          onClick={() => {
+                            setReplyingToCommentId(replyingToCommentId === comment.id ? null : comment.id);
+                            setReplyMentionIndex(0);
+                            setReplyDraft("");
+                          }}
                         >
-                          {emoji} {item?.count || 0}
+                          답글
                         </button>
-                      );
-                    })}
+                      ) : null}
+                    </div>
+
+                    {replyingToCommentId === comment.id ? (
+                      <form
+                        className="mt-2 flex gap-2"
+                        onSubmit={async (event) => {
+                          if (!replyDraft.trim()) { event.preventDefault(); return; }
+                          await handleCreateComment(event, "", replyDraft, comment.id);
+                          setReplyingToCommentId(null);
+                          setReplyMentionIndex(0);
+                          setReplyDraft("");
+                        }}
+                      >
+                        <div className="relative min-w-0 flex-1">
+                          <Input
+                            value={replyDraft}
+                            placeholder="답글 입력... (@멘션 지원)"
+                            aria-label="답글 입력"
+                            aria-haspopup="listbox"
+                            aria-autocomplete="list"
+                            aria-expanded={replyMentionState.matches.length > 0}
+                            aria-controls={replyMentionState.matches.length ? replyMentionState.listboxId : undefined}
+                            aria-activedescendant={replyMentionState.matches.length ? replyMentionState.activeOptionId : undefined}
+                            aria-describedby={replyMentionState.matches.length ? replyMentionState.statusId : undefined}
+                            onChange={(event) => {
+                              setReplyDraft(event.target.value);
+                              setReplyMentionIndex(0);
+                            }}
+                            onKeyDown={(event) =>
+                              handleMentionKeyDown(
+                                event,
+                                replyMentionState.matches,
+                                replyMentionState.activeIndex,
+                                setReplyMentionIndex,
+                                setReplyDraft,
+                                replyDraft
+                              )
+                            }
+                          />
+                          <MentionAssistPanel
+                            matches={replyMentionState.matches}
+                            activeIndex={replyMentionState.activeIndex}
+                            setActiveIndex={setReplyMentionIndex}
+                            applyMention={applyMention}
+                            draft={replyDraft}
+                            setDraft={setReplyDraft}
+                            preview={replyMentionState.preview}
+                            removeMention={removeMention}
+                            statusId={replyMentionState.statusId}
+                            listboxId={replyMentionState.listboxId}
+                            activeOptionId={replyMentionState.activeOptionId}
+                            announcement={replyMentionState.announcement}
+                            helpId="reply-mention-help"
+                            helpText=""
+                            listboxLabel="답글 멘션 후보"
+                            previewTitle="답글 멘션 대상 미리보기"
+                          />
+                        </div>
+                        <Button type="submit" size="sm" disabled={!replyDraft.trim()}>등록</Button>
+                      </form>
+                    ) : null}
                   </div>
+
+                  {replies.length > 0 ? (
+                    <div className="ml-4 mt-1 space-y-1 border-l-2 border-[var(--border)] pl-3">
+                      {replies.map((reply) => (
+                        <div key={reply.id} className="group rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-2.5">
+                          <div className="mb-1 flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[10px] font-semibold text-[var(--foreground)]">
+                                {(reply.userName || "?")[0].toUpperCase()}
+                              </span>
+                              <p className="text-xs font-semibold text-[var(--foreground)]">{reply.userName}</p>
+                            </div>
+                            <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                              <p className="text-[10px] text-[var(--muted)]">{formatTime(reply.createdAt)}</p>
+                              {!isReadOnly && (reply.userId === currentUserId || canModerate) ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] transition"
+                                    onClick={() => { setEditingCommentId(reply.id); setEditingCommentDraft(reply.content || ""); }}
+                                  >
+                                    수정
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                                    onClick={() => setDeleteCommentId(reply.id)}
+                                  >
+                                    삭제
+                                  </button>
+                                </>
+                              ) : null}
+                            </div>
+                          </div>
+                          {editingCommentId === reply.id ? (
+                            <div className="space-y-1.5">
+                              <Input value={editingCommentDraft} onChange={(event) => setEditingCommentDraft(event.target.value)} placeholder="답글 수정" />
+                              <div className="flex gap-1">
+                                <Button type="button" size="sm" onClick={async () => { const next = editingCommentDraft.trim(); if (!next) return; await handleUpdateComment(reply.id, next); setEditingCommentId(null); setEditingCommentDraft(""); }}>저장</Button>
+                                <Button type="button" size="sm" variant="outline" onClick={() => { setEditingCommentId(null); setEditingCommentDraft(""); }}>취소</Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-sm leading-relaxed text-[var(--foreground)]">{renderCommentContent(reply.content)}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ))
             ) : (
@@ -798,7 +815,11 @@ export function IdeaStudioPanel({
         onClose={() => {
           setBlockCommentPanelOpen(false);
           setBlockCommentDraft("");
+          setBlockCommentMentionIndex(0);
           setCommentFilterBlockId("");
+          setReplyingToCommentId(null);
+          setReplyMentionIndex(0);
+          setReplyDraft("");
         }}
         widthClass="max-w-md"
       >
@@ -812,27 +833,128 @@ export function IdeaStudioPanel({
               }
               await handleCreateComment(event, blockCommentPanelBlockId, blockCommentDraft);
               setBlockCommentDraft("");
+              setBlockCommentMentionIndex(0);
             }}
           >
-            <Input
-              value={blockCommentDraft}
-              placeholder="이 블록에 댓글 입력..."
-              onChange={(event) => setBlockCommentDraft(event.target.value)}
-              aria-label="블록 댓글 입력"
-            />
+            <div className="relative min-w-0 flex-1">
+              <Input
+                value={blockCommentDraft}
+                placeholder="이 블록에 댓글 입력... (@멘션 지원)"
+                onChange={(event) => {
+                  setBlockCommentDraft(event.target.value);
+                  setBlockCommentMentionIndex(0);
+                }}
+                onKeyDown={(event) =>
+                  handleMentionKeyDown(
+                    event,
+                    blockCommentMentionState.matches,
+                    blockCommentMentionState.activeIndex,
+                    setBlockCommentMentionIndex,
+                    setBlockCommentDraft,
+                    blockCommentDraft
+                  )
+                }
+                aria-label="블록 댓글 입력"
+                aria-haspopup="listbox"
+                aria-autocomplete="list"
+                aria-expanded={blockCommentMentionState.matches.length > 0}
+                aria-controls={blockCommentMentionState.matches.length ? blockCommentMentionState.listboxId : undefined}
+                aria-activedescendant={blockCommentMentionState.matches.length ? blockCommentMentionState.activeOptionId : undefined}
+                aria-describedby={blockCommentMentionState.matches.length ? blockCommentMentionState.statusId : undefined}
+              />
+              <MentionAssistPanel
+                matches={blockCommentMentionState.matches}
+                activeIndex={blockCommentMentionState.activeIndex}
+                setActiveIndex={setBlockCommentMentionIndex}
+                applyMention={applyMention}
+                draft={blockCommentDraft}
+                setDraft={setBlockCommentDraft}
+                preview={blockCommentMentionState.preview}
+                removeMention={removeMention}
+                statusId={blockCommentMentionState.statusId}
+                listboxId={blockCommentMentionState.listboxId}
+                activeOptionId={blockCommentMentionState.activeOptionId}
+                announcement={blockCommentMentionState.announcement}
+                helpId="block-comment-mention-help"
+                helpText=""
+                listboxLabel="블록 댓글 멘션 후보"
+                previewTitle="블록 댓글 멘션 대상 미리보기"
+              />
+            </div>
             <Button type="submit" size="sm" disabled={!blockCommentDraft.trim()}>등록</Button>
           </form>
         )}
 
         <div className="space-y-2">
-          {blockComments.map((comment) => (
-              <div key={comment.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-                <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
-                  <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
+          {blockCommentThreads.map(({ comment, replies }) => (
+            <div key={comment.id}>
+              <div className="group rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3 transition-all duration-150 hover:border-[var(--border)]/60 hover:shadow-sm">
+                <div className="mb-1.5 flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-xs font-semibold text-[var(--foreground)]">
+                      {(comment.userName || "?")[0].toUpperCase()}
+                    </span>
+                    <p className="text-xs font-semibold text-[var(--foreground)]">{comment.userName}</p>
+                  </div>
+                  <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                    <p className="text-[10px] text-[var(--muted)]">{formatTime(comment.createdAt)}</p>
+                    {!isReadOnly && (comment.userId === currentUserId || canModerate) ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] transition"
+                          onClick={() => { setEditingCommentId(comment.id); setEditingCommentDraft(comment.content || ""); }}
+                        >
+                          수정
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                          onClick={() => setDeleteCommentId(comment.id)}
+                        >
+                          삭제
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
-                <p className="text-sm text-[var(--foreground)]">{comment.content}</p>
-                <div className="mt-2 flex flex-wrap gap-1">
+
+                {editingCommentId === comment.id ? (
+                  <div className="space-y-2">
+                    <Input
+                      value={editingCommentDraft}
+                      onChange={(event) => setEditingCommentDraft(event.target.value)}
+                      placeholder="댓글 수정"
+                    />
+                    <div className="flex gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={async () => {
+                          const next = editingCommentDraft.trim();
+                          if (!next) return;
+                          await handleUpdateComment(comment.id, next);
+                          setEditingCommentId(null);
+                          setEditingCommentDraft("");
+                        }}
+                      >
+                        저장
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => { setEditingCommentId(null); setEditingCommentDraft(""); }}
+                      >
+                        취소
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm leading-relaxed text-[var(--foreground)]">{renderCommentContent(comment.content)}</p>
+                )}
+
+                <div className="mt-2 flex flex-wrap items-center gap-1">
                   {["👍", "🔥", "✅"].map((emoji) => {
                     const targetId = `idea:${comment.id}`;
                     const key = `comment:${targetId}`;
@@ -851,9 +973,132 @@ export function IdeaStudioPanel({
                       </button>
                     );
                   })}
+                  {!isReadOnly ? (
+                    <button
+                      type="button"
+                      className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent)] transition"
+                      onClick={() => {
+                        setReplyingToCommentId(replyingToCommentId === comment.id ? null : comment.id);
+                        setReplyMentionIndex(0);
+                        setReplyDraft("");
+                      }}
+                    >
+                      답글
+                    </button>
+                  ) : null}
                 </div>
+
+                {replyingToCommentId === comment.id ? (
+                  <form
+                    className="mt-2 flex gap-2"
+                    onSubmit={async (event) => {
+                      if (!replyDraft.trim()) { event.preventDefault(); return; }
+                      await handleCreateComment(event, comment.blockId || blockCommentPanelBlockId, replyDraft, comment.id);
+                      setReplyingToCommentId(null);
+                      setReplyMentionIndex(0);
+                      setReplyDraft("");
+                    }}
+                  >
+                    <div className="relative min-w-0 flex-1">
+                      <Input
+                        value={replyDraft}
+                        placeholder="답글 입력... (@멘션 지원)"
+                        aria-label="답글 입력"
+                        aria-haspopup="listbox"
+                        aria-autocomplete="list"
+                        aria-expanded={replyMentionState.matches.length > 0}
+                        aria-controls={replyMentionState.matches.length ? replyMentionState.listboxId : undefined}
+                        aria-activedescendant={replyMentionState.matches.length ? replyMentionState.activeOptionId : undefined}
+                        aria-describedby={replyMentionState.matches.length ? replyMentionState.statusId : undefined}
+                        onChange={(event) => {
+                          setReplyDraft(event.target.value);
+                          setReplyMentionIndex(0);
+                        }}
+                        onKeyDown={(event) =>
+                          handleMentionKeyDown(
+                            event,
+                            replyMentionState.matches,
+                            replyMentionState.activeIndex,
+                            setReplyMentionIndex,
+                            setReplyDraft,
+                            replyDraft
+                          )
+                        }
+                      />
+                      <MentionAssistPanel
+                        matches={replyMentionState.matches}
+                        activeIndex={replyMentionState.activeIndex}
+                        setActiveIndex={setReplyMentionIndex}
+                        applyMention={applyMention}
+                        draft={replyDraft}
+                        setDraft={setReplyDraft}
+                        preview={replyMentionState.preview}
+                        removeMention={removeMention}
+                        statusId={replyMentionState.statusId}
+                        listboxId={replyMentionState.listboxId}
+                        activeOptionId={replyMentionState.activeOptionId}
+                        announcement={replyMentionState.announcement}
+                        helpId="block-reply-mention-help"
+                        helpText=""
+                        listboxLabel="블록 답글 멘션 후보"
+                        previewTitle="블록 답글 멘션 대상 미리보기"
+                      />
+                    </div>
+                    <Button type="submit" size="sm" disabled={!replyDraft.trim()}>등록</Button>
+                  </form>
+                ) : null}
               </div>
-            ))}
+
+              {replies.length > 0 ? (
+                <div className="ml-4 mt-1 space-y-1 border-l-2 border-[var(--border)] pl-3">
+                  {replies.map((reply) => (
+                    <div key={reply.id} className="group rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2.5">
+                      <div className="mb-1 flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--surface-strong)] text-[10px] font-semibold text-[var(--foreground)]">
+                            {(reply.userName || "?")[0].toUpperCase()}
+                          </span>
+                          <p className="text-xs font-semibold text-[var(--foreground)]">{reply.userName}</p>
+                        </div>
+                        <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                          <p className="text-[10px] text-[var(--muted)]">{formatTime(reply.createdAt)}</p>
+                          {!isReadOnly && (reply.userId === currentUserId || canModerate) ? (
+                            <>
+                              <button
+                                type="button"
+                                className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
+                                onClick={() => { setEditingCommentId(reply.id); setEditingCommentDraft(reply.content || ""); }}
+                              >
+                                수정
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded px-1.5 py-0.5 text-[10px] text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition"
+                                onClick={() => setDeleteCommentId(reply.id)}
+                              >
+                                삭제
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      {editingCommentId === reply.id ? (
+                        <div className="space-y-1.5">
+                          <Input value={editingCommentDraft} onChange={(event) => setEditingCommentDraft(event.target.value)} placeholder="답글 수정" />
+                          <div className="flex gap-1">
+                            <Button type="button" size="sm" onClick={async () => { const next = editingCommentDraft.trim(); if (!next) return; await handleUpdateComment(reply.id, next); setEditingCommentId(null); setEditingCommentDraft(""); }}>저장</Button>
+                            <Button type="button" size="sm" variant="outline" onClick={() => { setEditingCommentId(null); setEditingCommentDraft(""); }}>취소</Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-sm leading-relaxed text-[var(--foreground)]">{renderCommentContent(reply.content)}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
           {blockComments.length === 0 && (
             <p className="py-4 text-center text-sm text-[var(--muted)]">이 블록에 댓글이 없습니다.</p>
           )}

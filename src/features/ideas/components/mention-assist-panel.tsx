@@ -38,7 +38,7 @@ export function MentionAssistPanel({
                 size="sm"
                 variant={matches[activeIndex]?.userId === member.userId ? "default" : "outline"}
                 onMouseEnter={() => setActiveIndex(matches.findIndex((item) => item.userId === member.userId))}
-                onClick={() => applyMention(setDraft, draft, member.email)}
+                onClick={() => applyMention(setDraft, draft, member)}
                 className="h-auto justify-start"
               >
                 <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--surface-strong)] text-[10px] font-semibold text-[var(--muted)]">

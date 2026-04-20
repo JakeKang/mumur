@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
 import { marked, type Tokens } from "marked";
+import { getCollaborationColor } from "@/shared/utils/collaboration-colors";
 
 export type BlockType =
   | "paragraph"
@@ -17,7 +18,8 @@ export type BlockType =
   | "divider"
   | "file"
   | "callout"
-  | "image";
+  | "image"
+  | "video";
 
 export type EditorBlockData = {
   id: string;
@@ -56,6 +58,8 @@ const SLASH_OPTIONS: Array<{ type: BlockType; icon: string; label: string; keywo
   { type: "code", icon: "</>", label: "코드", keywords: ["code", "코드"] },
   { type: "callout", icon: "💬", label: "콜아웃", keywords: ["callout", "info", "알림", "강조"] },
   { type: "image", icon: "🖼️", label: "이미지", keywords: ["image", "img", "이미지", "사진"] },
+  { type: "video", icon: "🎬", label: "동영상", keywords: ["video", "movie", "동영상", "영상"] },
+  { type: "file", icon: "📎", label: "파일", keywords: ["file", "upload", "첨부", "파일"] },
   { type: "divider", icon: "—", label: "구분선", keywords: ["divider", "hr", "구분"] },
   { type: "paragraph", icon: "¶", label: "단락", keywords: ["p", "paragraph", "단락", "text"] },
 ];
@@ -89,6 +93,12 @@ type InlineToken = Tokens.Generic & {
   title?: string;
   text?: string;
   raw?: string;
+};
+
+type SelectionSnapshot = {
+  start: number;
+  end: number;
+  direction: "forward" | "backward" | "none";
 };
 
 function inlineTokens(content: string): InlineToken[] {
@@ -162,6 +172,88 @@ function toStableLineEntries(lines: string[]) {
   });
 }
 
+function getLineIndexAtPosition(lines: string[], position: number): number {
+  let offset = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineLength = lines[index].length;
+    if (position <= offset + lineLength) {
+      return index;
+    }
+    offset += lineLength + 1;
+  }
+  return Math.max(0, lines.length - 1);
+}
+
+function transformPositionForLineIndent(
+  originalPosition: number,
+  originalLineStart: number,
+  removedSpaces: number,
+  addedSpaces: number
+): number {
+  if (addedSpaces > 0) {
+    return originalPosition >= originalLineStart ? addedSpaces : 0;
+  }
+
+  if (removedSpaces <= 0 || originalPosition <= originalLineStart) {
+    return 0;
+  }
+
+  if (originalPosition <= originalLineStart + removedSpaces) {
+    return originalLineStart - originalPosition;
+  }
+
+  return -removedSpaces;
+}
+
+function adjustListIndentation(
+  content: string,
+  selectionStart: number,
+  selectionEnd: number,
+  direction: "indent" | "dedent"
+) {
+  const lines = content.split("\n");
+  const startLineIndex = getLineIndexAtPosition(lines, selectionStart);
+  const selectionEndAnchor = selectionEnd > selectionStart && content[selectionEnd - 1] === "\n"
+    ? selectionEnd - 1
+    : selectionEnd;
+  const endLineIndex = getLineIndexAtPosition(lines, selectionEndAnchor);
+
+  let offset = 0;
+  let startDelta = 0;
+  let endDelta = 0;
+
+  const nextLines = lines.map((line, index) => {
+    const lineStart = offset;
+    offset += line.length + 1;
+
+    if (index < startLineIndex || index > endLineIndex) {
+      return line;
+    }
+
+    if (direction === "indent") {
+      startDelta += transformPositionForLineIndent(selectionStart, lineStart, 0, 2);
+      endDelta += transformPositionForLineIndent(selectionEnd, lineStart, 0, 2);
+      return `  ${line}`;
+    }
+
+    const removedSpaces = Math.min(2, line.match(/^ */)?.[0]?.length || 0);
+    startDelta += transformPositionForLineIndent(selectionStart, lineStart, removedSpaces, 0);
+    endDelta += transformPositionForLineIndent(selectionEnd, lineStart, removedSpaces, 0);
+    return line.slice(removedSpaces);
+  });
+
+  const nextSelectionStart = Math.max(0, selectionStart + startDelta);
+  const nextSelectionEnd = selectionStart === selectionEnd
+    ? nextSelectionStart
+    : Math.max(nextSelectionStart, selectionEnd + endDelta);
+
+  return {
+    content: nextLines.join("\n"),
+    selectionStart: nextSelectionStart,
+    selectionEnd: nextSelectionEnd
+  };
+}
+
 function renderInline(tokens: InlineToken[], muted?: boolean): ReactNode {
   return (
     <span className={muted ? "text-[var(--muted)]" : undefined}>
@@ -187,6 +279,91 @@ function sanitizeLinkHref(value: string): string {
     return href;
   }
   return "";
+}
+
+function parseMediaContent(content: string) {
+  const raw = String(content || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("/")) {
+    return { filePath: raw, name: "", type: "", size: 0, status: "uploaded" };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveMediaUrl(content: string) {
+  const parsed = parseMediaContent(content);
+  if (parsed?.filePath) {
+    return String(parsed.filePath).trim();
+  }
+  const raw = String(content || "").trim();
+  if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("/")) {
+    return raw;
+  }
+  return "";
+}
+
+function captureSelectionSnapshot(textarea: HTMLTextAreaElement): SelectionSnapshot {
+  return {
+    start: textarea.selectionStart,
+    end: textarea.selectionEnd,
+    direction: textarea.selectionDirection ?? "none"
+  };
+}
+
+function clampSelectionSnapshot(snapshot: SelectionSnapshot, valueLength: number): SelectionSnapshot {
+  const safeStart = Math.max(0, Math.min(snapshot.start, valueLength));
+  const safeEnd = Math.max(safeStart, Math.min(snapshot.end, valueLength));
+  return {
+    start: safeStart,
+    end: safeEnd,
+    direction: snapshot.direction
+  };
+}
+
+function shouldApplyExternalContentImmediately(blockType: BlockType, content: string): boolean {
+  if (blockType === "file") {
+    return true;
+  }
+  if (blockType !== "image" && blockType !== "video") {
+    return false;
+  }
+  const parsed = parseMediaContent(content);
+  return Boolean(parsed && typeof parsed === "object" && (parsed.status || parsed.filePath || parsed.name));
+}
+
+function EditingAffordance({ block }: { block: EditorBlockData }) {
+  if (block.type === "checklist") {
+    return <span className="mt-2 shrink-0 text-base text-[var(--muted)]">☐</span>;
+  }
+  if (block.type === "bulletList") {
+    return <span className="mt-2 shrink-0 text-base text-[var(--muted)]">•</span>;
+  }
+  if (block.type === "numberedList") {
+    return <span className="mt-2 w-5 shrink-0 text-right text-sm text-[var(--muted)]">1.</span>;
+  }
+  if (block.type === "paragraph") {
+    return <span className="mt-2 shrink-0 text-xs font-medium text-[var(--muted)]">¶</span>;
+  }
+  if (block.type === "heading1") {
+    return <span className="mt-2 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">H1</span>;
+  }
+  if (block.type === "heading2") {
+    return <span className="mt-2 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">H2</span>;
+  }
+  if (block.type === "heading3") {
+    return <span className="mt-2 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">H3</span>;
+  }
+  if (block.type === "quote") {
+    return <span className="mt-2 shrink-0 text-base text-[var(--muted)]">❝</span>;
+  }
+  return null;
 }
 
 function highlightMatch(text: string, query: string): ReactNode {
@@ -215,8 +392,28 @@ type EditorBlockProps = {
   onFileUpload?: (file: File) => Promise<void>;
   onEnter: () => void;
   onDelete: () => void;
+  onCursorActivity?: (cursorOffset: number, typing?: boolean) => void;
+  remoteCursors?: Array<{ userId: number; userName: string; cursorOffset: number | null; isSelf: boolean }>;
   autoFocus?: boolean;
 };
+
+function getCursorOverlayPosition(
+  content: string,
+  cursorOffset: number | null,
+  lineHeight: number,
+  paddingTop: number,
+  scrollTop: number
+) {
+  if (cursorOffset === null || cursorOffset < 0) {
+    return { top: paddingTop, line: 1 };
+  }
+  const safeOffset = Math.min(cursorOffset, String(content || "").length);
+  const line = String(content || "").slice(0, safeOffset).split("\n").length;
+  return {
+    top: Math.max(paddingTop, paddingTop + (line - 1) * lineHeight - scrollTop),
+    line,
+  };
+}
 
 export function EditorBlock({
   block,
@@ -227,14 +424,90 @@ export function EditorBlock({
   onFileUpload,
   onEnter,
   onDelete,
+  onCursorActivity,
+  remoteCursors = [],
   autoFocus,
 }: EditorBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  const pendingExternalContentRef = useRef<string | null>(null);
+  const pendingSelectionRestoreRef = useRef<SelectionSnapshot | null>(null);
+  const selectionRestoreFrameRef = useRef<number | null>(null);
   const [slashActive, setSlashActive] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
-  const localContent = block.content || "";
+  const [overlayMetrics, setOverlayMetrics] = useState({ lineHeight: 24, paddingTop: 10, scrollTop: 0 });
+  const [draftContent, setDraftContent] = useState(block.content || "");
+  const localContent = draftContent;
+
+  const captureSelection = useCallback((target?: HTMLTextAreaElement | null) => {
+    const textarea = target ?? textareaRef.current;
+    if (!textarea) {
+      return null;
+    }
+    const snapshot = captureSelectionSnapshot(textarea);
+    pendingSelectionRestoreRef.current = snapshot;
+    return snapshot;
+  }, []);
+
+  const scheduleSelectionRestore = useCallback((snapshot: SelectionSnapshot | null) => {
+    if (!snapshot) {
+      return;
+    }
+    if (selectionRestoreFrameRef.current !== null) {
+      cancelAnimationFrame(selectionRestoreFrameRef.current);
+    }
+    selectionRestoreFrameRef.current = requestAnimationFrame(() => {
+      selectionRestoreFrameRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea || document.activeElement !== textarea || isComposingRef.current) {
+        return;
+      }
+      const clamped = clampSelectionSnapshot(snapshot, textarea.value.length);
+      textarea.setSelectionRange(clamped.start, clamped.end, clamped.direction);
+      pendingSelectionRestoreRef.current = clamped;
+    });
+  }, []);
+
+  const syncDraftContent = useCallback((nextContent: string, restoreSelection: boolean) => {
+    const selectionSnapshot = restoreSelection ? captureSelection() : null;
+    queueMicrotask(() => {
+      setDraftContent((current) => (current === nextContent ? current : nextContent));
+      if (restoreSelection) {
+        scheduleSelectionRestore(selectionSnapshot);
+      }
+    });
+  }, [captureSelection, scheduleSelectionRestore]);
+
+  useEffect(() => {
+    const nextContent = block.content || "";
+    if (isComposingRef.current) {
+      pendingExternalContentRef.current = nextContent;
+      return;
+    }
+
+    const textarea = textareaRef.current;
+    const isFocusedTextEditor = Boolean(isEditing && textarea && document.activeElement === textarea);
+    const shouldDeferSync = isFocusedTextEditor
+      && nextContent !== localContent
+      && !shouldApplyExternalContentImmediately(block.type, nextContent);
+
+    if (shouldDeferSync) {
+      pendingExternalContentRef.current = nextContent;
+      return;
+    }
+
+    pendingExternalContentRef.current = null;
+    syncDraftContent(nextContent, isFocusedTextEditor);
+  }, [block.content, block.type, isEditing, localContent, syncDraftContent]);
+
+  useEffect(() => {
+    return () => {
+      if (selectionRestoreFrameRef.current !== null) {
+        cancelAnimationFrame(selectionRestoreFrameRef.current);
+      }
+    };
+  }, []);
 
   const filteredSlashOptions = useMemo(() => {
     if (!slashActive) {
@@ -298,6 +571,31 @@ export function EditorBlock({
     }
   }, [isEditing, autoFocus]);
 
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const style = window.getComputedStyle(textarea);
+    const fontSize = Number.parseFloat(style.fontSize || "16") || 16;
+    const lineHeight = Number.parseFloat(style.lineHeight || "") || fontSize * 1.5;
+    const paddingTop = Number.parseFloat(style.paddingTop || "") || 4;
+
+    setOverlayMetrics((current) => {
+      const next = {
+        lineHeight,
+        paddingTop,
+        scrollTop: textarea.scrollTop,
+      };
+      return current.lineHeight === next.lineHeight
+        && current.paddingTop === next.paddingTop
+        && current.scrollTop === next.scrollTop
+        ? current
+        : next;
+    });
+  }, []);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       const native = e.nativeEvent as unknown as { isComposing?: boolean; keyCode?: number };
@@ -345,33 +643,18 @@ export function EditorBlock({
         if (block.type === "bulletList" || block.type === "numberedList" || block.type === "checklist") {
           const textarea = textareaRef.current;
           if (textarea) {
-            const start = textarea.selectionStart;
-            const end = textarea.selectionEnd;
-            if (!e.shiftKey) {
-              const newValue = localContent.slice(0, start) + "  " + localContent.slice(end);
-              onChange(newValue);
-              requestAnimationFrame(() => {
-                if (textareaRef.current) {
-                  textareaRef.current.setSelectionRange(start + 2, start + 2);
-                }
-              });
-            } else {
-              const lineStart = localContent.lastIndexOf("\n", start - 1) + 1;
-              const linePrefix = localContent.slice(lineStart, start);
-              const spacesToRemove = linePrefix.startsWith("  ") ? 2 : linePrefix.startsWith(" ") ? 1 : 0;
-              if (spacesToRemove > 0) {
-                const newValue = localContent.slice(0, lineStart) + localContent.slice(lineStart + spacesToRemove);
-                onChange(newValue);
-                requestAnimationFrame(() => {
-                  if (textareaRef.current) {
-                    textareaRef.current.setSelectionRange(
-                      Math.max(lineStart, start - spacesToRemove),
-                      Math.max(lineStart, start - spacesToRemove)
-                    );
-                  }
-                });
+            const nextState = adjustListIndentation(
+              localContent,
+              textarea.selectionStart,
+              textarea.selectionEnd,
+              e.shiftKey ? "dedent" : "indent"
+            );
+            onChange(nextState.content);
+            requestAnimationFrame(() => {
+              if (textareaRef.current) {
+                textareaRef.current.setSelectionRange(nextState.selectionStart, nextState.selectionEnd);
               }
-            }
+            });
           }
         }
         return;
@@ -401,9 +684,18 @@ export function EditorBlock({
     ]
   );
 
+  const emitCursorOffset = useCallback((typing = false) => {
+    const position = textareaRef.current?.selectionStart;
+    captureSelection();
+    if (typeof position === "number") {
+      onCursorActivity?.(position, typing);
+    }
+  }, [captureSelection, onCursorActivity]);
+
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value;
+      captureSelection(e.target);
 
       if (value.startsWith("/")) {
         const query = value.slice(1).toLowerCase();
@@ -419,14 +711,21 @@ export function EditorBlock({
         setSlashSelectedIndex(0);
       }
 
+      const nextCursor = e.target.selectionStart;
+
       const detected = detectBlockType(value, block.type);
       if (detected) {
+        setDraftContent(detected.content);
         onChange(detected.content, detected.type);
       } else {
+        setDraftContent(value);
         onChange(value);
       }
+      if (typeof nextCursor === "number") {
+        onCursorActivity?.(nextCursor, true);
+      }
     },
-    [block.type, onChange, slashActive]
+    [block.type, captureSelection, onChange, onCursorActivity, slashActive]
   );
 
   const editingValue = slashActive ? `/${slashQuery}` : localContent;
@@ -463,14 +762,19 @@ export function EditorBlock({
         return "rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 px-4 py-2 text-sm";
       case "image":
         return "font-mono text-xs text-[var(--muted)]";
+      case "video":
+        return "font-mono text-xs text-[var(--muted)]";
       case "bulletList":
       case "numberedList":
       case "checklist":
-        return "pl-4";
+        return "min-h-[40px]";
+      case "paragraph":
+        return "min-h-[40px]";
       default:
         return "text-sm leading-relaxed";
     }
   })();
+  const visibleRemoteCursors = remoteCursors.filter((cursor) => !cursor.isSelf).slice(0, 3);
   const placeholderText = (() => {
     switch (block.type) {
       case "heading1":
@@ -493,6 +797,8 @@ export function EditorBlock({
         return "💡 콜아웃 텍스트 (시작에 이모지 넣기 가능)...";
       case "image":
         return "이미지 URL을 입력하세요 (https://...)";
+      case "video":
+        return "동영상 URL을 입력하거나 업로드하세요";
       default:
         return "/ 로 블록 전환, 텍스트 입력...";
     }
@@ -542,10 +848,20 @@ export function EditorBlock({
               className="max-h-72 w-auto rounded-md border border-[var(--border)] object-contain"
             />
           ) : null}
+          {fileData.type?.startsWith("video/") && fileData.filePath ? (
+            <video src={fileData.filePath} controls className="max-h-80 w-full rounded-md border border-[var(--border)] bg-black/80">
+              <track kind="captions" />
+            </video>
+          ) : null}
           {fileData.filePath ? (
-            <a href={fileData.filePath} target="_blank" rel="noreferrer" className="inline-block text-xs text-[var(--foreground)] underline">
-              파일 열기
-            </a>
+            <div className="flex gap-3 text-xs">
+              <a href={fileData.filePath} target="_blank" rel="noreferrer" className="inline-block text-[var(--foreground)] underline">
+                파일 열기
+              </a>
+              <a href={fileData.filePath} download={fileData.name || true} className="inline-block text-[var(--foreground)] underline">
+                다운로드
+              </a>
+            </div>
           ) : null}
           {fileData.status === "uploading" ? <p className="text-xs text-[var(--muted)]">업로드 중...</p> : null}
           {fileData.status === "failed" ? <p className="text-xs text-rose-600">업로드 실패</p> : null}
@@ -562,7 +878,7 @@ export function EditorBlock({
         <input
           type="file"
           className="hidden"
-          accept="*/*"
+          accept=".png,.jpg,.jpeg,.gif,.webp,.heic,.mp4,.mov,.webm,.txt,.pdf,.md,.csv,.json"
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (!file) return;
@@ -579,9 +895,14 @@ export function EditorBlock({
 
   // --- Checklist (render mode) ---
   if (!isEditing && block.type === "checklist") {
+    const leadingSpaces = block.content.match(/^ */)?.[0]?.length || 0;
+    const level = Math.floor(leadingSpaces / 2);
+    const checklistContent = block.content.slice(leadingSpaces);
+    const checklistNodes = inlineTokens(checklistContent || "");
     return (
       <div
         className="flex cursor-pointer items-start gap-2 rounded-md p-1 hover:bg-[var(--surface-strong)]"
+        style={{ paddingLeft: `${level * 16}px` }}
       >
         <input
           type="checkbox"
@@ -597,9 +918,57 @@ export function EditorBlock({
           <span
             className={`text-sm leading-relaxed ${block.checked ? "text-[var(--muted)] line-through" : "text-[var(--foreground)]"}`}
           >
-            {block.content || "\u00A0"}
+            {renderInline(checklistNodes, !checklistContent)}
           </span>
         </button>
+      </div>
+    );
+  }
+
+  if (isEditing && (block.type === "image" || block.type === "video")) {
+    const media = parseMediaContent(localContent);
+    const mediaUrl = resolveMediaUrl(localContent);
+    const isImage = block.type === "image";
+    return (
+      <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+        {isImage && mediaUrl ? (
+          <Image src={mediaUrl} alt="" width={1280} height={720} unoptimized className="max-h-72 w-full rounded-md object-contain" />
+        ) : null}
+        {!isImage && mediaUrl ? (
+          <video src={mediaUrl} controls className="max-h-80 w-full rounded-md border border-[var(--border)] bg-black/80">
+            <track kind="captions" />
+          </video>
+        ) : null}
+        <textarea
+          ref={textareaRef}
+          className="w-full resize-none rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--accent)]"
+          rows={2}
+          value={mediaUrl}
+          onChange={(e) => onChange(e.target.value, block.type)}
+          onKeyDown={handleKeyDown}
+          onKeyUp={() => emitCursorOffset(false)}
+          onSelect={() => emitCursorOffset(false)}
+          onFocus={() => {
+            captureSelection();
+            onFocus();
+            emitCursorOffset(false);
+          }}
+          placeholder={placeholderText}
+        />
+        <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--foreground)] transition hover:border-[var(--accent)]/40">
+          <span>{isImage ? "🖼️" : "🎬"}</span>
+          <span>{isImage ? "이미지 업로드" : "동영상 업로드"}</span>
+          <input
+            type="file"
+            className="hidden"
+            accept={isImage ? "image/*" : "video/*"}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file || !onFileUpload) return;
+              void onFileUpload(file);
+            }}
+          />
+        </label>
       </div>
     );
   }
@@ -608,32 +977,101 @@ export function EditorBlock({
   if (isEditing) {
     return (
       <div className="relative">
-        <textarea
-          ref={textareaRef}
-          className={`w-full resize-none border-0 bg-transparent p-1 text-[var(--foreground)] outline-none focus:ring-0 ${textareaBlockClass} ${block.type === "code" ? "" : "rounded-md"}`}
-          rows={rows}
-          value={editingValue}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onCompositionStart={() => {
-            isComposingRef.current = true;
-          }}
-          onCompositionEnd={() => {
-            queueMicrotask(() => {
-              isComposingRef.current = false;
-            });
-          }}
-          onBlur={() => {
-            if (slashActive) {
-              setSlashActive(false);
-              setSlashQuery("");
-              setSlashSelectedIndex(0);
-            } else {
-              onChange(localContent);
-            }
-          }}
-          placeholder={placeholderText}
-        />
+        {visibleRemoteCursors.length > 0 ? (
+          <div className="pointer-events-none absolute inset-y-2 right-2 z-10 hidden w-28 md:block">
+            {visibleRemoteCursors.map((cursor) => {
+              const overlay = getCursorOverlayPosition(
+                localContent,
+                cursor.cursorOffset,
+                overlayMetrics.lineHeight,
+                overlayMetrics.paddingTop,
+                overlayMetrics.scrollTop
+              );
+              const color = getCollaborationColor(cursor.userId, cursor.isSelf);
+              return (
+                <div
+                  key={`remote-cursor-${block.id}-${cursor.userId}`}
+                  className="absolute right-0 flex items-center gap-1"
+                  style={{ top: `${overlay.top}px` }}
+                >
+                  <span className="h-5 w-[2px] rounded-full shadow-[0_0_0_1px_rgba(15,23,42,0.06)]" style={{ backgroundColor: color.accent }} aria-hidden="true" />
+                  <span className="inline-flex max-w-[96px] items-center gap-1 rounded-full bg-white/95 px-2 py-0.5 text-[10px] font-medium shadow-sm backdrop-blur-sm" style={{ border: `1px solid ${color.border}`, color: color.text }}>
+                    <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color.accent }} aria-hidden="true" />
+                    <span className="truncate">{cursor.userName}</span>
+                    <span style={{ color: color.text, opacity: 0.72 }}>작업 중</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        <div className={`flex items-start gap-2 rounded-md ${block.type === "quote" ? "border-l-2 border-[var(--border)] pl-3" : ""} ${block.type === "callout" ? "rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 px-4 py-2" : ""}`}>
+          <EditingAffordance block={block} />
+          {block.type === "checklist" ? (
+            <input
+              type="checkbox"
+              className="mt-2"
+              checked={Boolean(block.checked)}
+              onChange={(e) => onChange(localContent, undefined, { checked: e.target.checked })}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : null}
+          <textarea
+            ref={textareaRef}
+            className={`w-full resize-none border-0 bg-transparent p-1 text-[var(--foreground)] outline-none focus:ring-0 ${visibleRemoteCursors.length > 0 ? "md:pr-28" : ""} ${textareaBlockClass} ${block.type === "code" ? "" : "rounded-md"}`}
+            rows={rows}
+            value={editingValue}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            onKeyUp={() => emitCursorOffset(false)}
+            onSelect={() => emitCursorOffset(false)}
+            onClick={() => emitCursorOffset(false)}
+            onFocus={() => {
+              captureSelection();
+              onFocus();
+              emitCursorOffset(false);
+            }}
+            onScroll={(event) => {
+              const nextScrollTop = event.currentTarget.scrollTop;
+              setOverlayMetrics((current) => current.scrollTop === nextScrollTop ? current : { ...current, scrollTop: nextScrollTop });
+            }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+              captureSelection();
+            }}
+            onCompositionEnd={() => {
+              requestAnimationFrame(() => {
+                isComposingRef.current = false;
+                if (pendingExternalContentRef.current !== null) {
+                  const nextContent = pendingExternalContentRef.current;
+                  const textarea = textareaRef.current;
+                  const isFocusedTextEditor = Boolean(isEditing && textarea && document.activeElement === textarea);
+                  if (isFocusedTextEditor && !shouldApplyExternalContentImmediately(block.type, nextContent)) {
+                    return;
+                  }
+                  pendingExternalContentRef.current = null;
+                  syncDraftContent(nextContent, false);
+                }
+              });
+            }}
+            onBlur={() => {
+              if (slashActive) {
+                setSlashActive(false);
+                setSlashQuery("");
+                setSlashSelectedIndex(0);
+              } else {
+                onChange(localContent);
+              }
+              if (pendingExternalContentRef.current !== null) {
+                const nextContent = pendingExternalContentRef.current;
+                pendingExternalContentRef.current = null;
+                syncDraftContent(nextContent, false);
+              }
+            }}
+            placeholder={placeholderText}
+          />
+        </div>
 
         {slashActive && (displayOptions.length > 0 || Boolean(slashQuery)) && (
           <div className="absolute left-0 top-full z-50 mt-1 w-52 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg">
@@ -797,8 +1235,8 @@ export function EditorBlock({
   }
 
   if (block.type === "image") {
-    const url = localContent.trim();
-    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+    const url = resolveMediaUrl(localContent);
+    if (url && (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("/"))) {
       return (
         <button
           type="button"
@@ -816,7 +1254,34 @@ export function EditorBlock({
         onMouseDown={activateOnPointer}
       >
         <span className="text-3xl">🖼️</span>
-        <p className="text-sm text-[var(--muted)]">클릭하여 이미지 URL 입력</p>
+        <p className="text-sm text-[var(--muted)]">클릭하여 이미지 URL 입력 또는 업로드</p>
+      </button>
+    );
+  }
+
+  if (block.type === "video") {
+    const url = resolveMediaUrl(localContent);
+    if (url && (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("/"))) {
+      return (
+        <button
+          type="button"
+          className="block w-full cursor-pointer overflow-hidden rounded-lg border border-[var(--border)] text-left"
+          onMouseDown={activateOnPointer}
+        >
+          <video src={url} controls className="max-h-80 w-full bg-black/80 object-contain">
+            <track kind="captions" />
+          </video>
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-[var(--border)] py-8 text-center transition hover:border-[var(--accent)]/40"
+        onMouseDown={activateOnPointer}
+      >
+        <span className="text-3xl">🎬</span>
+        <p className="text-sm text-[var(--muted)]">클릭하여 동영상 URL 입력 또는 업로드</p>
       </button>
     );
   }
