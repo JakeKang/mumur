@@ -3,6 +3,9 @@ export const NOTIFICATION_TYPES = [
   "comment.created",
   "version.created",
   "version.restored",
+  "team.invitation.pending",
+  "team.invitation.accepted",
+  "team.invitation.cancelled",
   "integration.webhook.updated",
 ];
 

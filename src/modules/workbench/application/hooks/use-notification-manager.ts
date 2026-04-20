@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { workbenchQueryKeys } from "@/modules/workbench/application/workbench-query-keys";
+import { fetchFreshQuery } from "@/modules/workbench/application/query-client-utils";
+import { getWorkbenchRealtimeClient } from "@/modules/workbench/application/workbench-realtime-client";
 import * as workbenchApi from "@/modules/workbench/infrastructure/workbench-api";
 import type { Notification } from "@/shared/types";
 
@@ -22,85 +26,34 @@ type UseNotificationManagerParams = {
   activeWorkspaceId: number | null;
 };
 
+function matchesRealtimeNotificationFilters(notification: Notification, filters: NotificationFilters) {
+  if (filters.eventType && notification.type !== filters.eventType) {
+    return false;
+  }
+  if (filters.unreadOnly && notification.read) {
+    return false;
+  }
+  if (filters.mentionsOnly && notification.type !== "mention.created") {
+    return false;
+  }
+  return true;
+}
+
 export function useNotificationManager({ api, authed, activeWorkspaceId }: UseNotificationManagerParams) {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [unreadCount, setUnreadCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
   const [notificationFilters, setNotificationFilters] = useState<NotificationFilters>(DEFAULT_NOTIFICATION_FILTERS);
   const [mutedTypes, setMutedTypes] = useState<string[]>([]);
 
-  const streamRef = useRef<EventSource | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectTryRef = useRef(0);
+  const queryClient = useQueryClient();
+  const realtimeClientRef = useRef(getWorkbenchRealtimeClient());
   const utilityTriggerRef = useRef<HTMLButtonElement | null>(null);
 
-  const disconnectStream = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.close();
-      streamRef.current = null;
-    }
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-    reconnectTryRef.current = 0;
-  }, []);
+  const notificationsQueryKey = useMemo(
+    () => workbenchQueryKeys.notifications(notificationFilters),
+    [notificationFilters]
+  );
 
-  const pushNotification = useCallback((notification: Notification) => {
-    setNotifications((prev) => {
-      if (prev.some((item) => item.id === notification.id)) {
-        return prev;
-      }
-      return [notification, ...prev].slice(0, 50);
-    });
-    if (!notification.read) {
-      setUnreadCount((prev) => prev + 1);
-    }
-  }, []);
-
-  const connectStream = useCallback(() => {
-    disconnectStream();
-    if (!authed || !activeWorkspaceId) {
-      return;
-    }
-
-    const open = () => {
-      if (!authed) {
-        return;
-      }
-
-      const source = new EventSource("/api/notifications/stream");
-      streamRef.current = source;
-
-      source.addEventListener("connected", () => {
-        reconnectTryRef.current = 0;
-      });
-
-      source.addEventListener("notification", (event) => {
-        const payload = JSON.parse(event.data);
-        pushNotification(payload);
-      });
-
-      source.onerror = () => {
-        if (streamRef.current) {
-          streamRef.current.close();
-          streamRef.current = null;
-        }
-        if (!authed) {
-          return;
-        }
-        const delay = Math.min(30000, 1000 * 2 ** reconnectTryRef.current);
-        reconnectTryRef.current += 1;
-        reconnectTimerRef.current = setTimeout(() => {
-          open();
-        }, delay);
-      };
-    };
-
-    open();
-  }, [activeWorkspaceId, authed, disconnectStream, pushNotification]);
-
-  const loadNotifications = useCallback(async () => {
+  const fetchNotifications = useCallback(async () => {
     const params = new URLSearchParams();
     params.set("limit", "20");
     if (notificationFilters.eventType) {
@@ -115,33 +68,123 @@ export function useNotificationManager({ api, authed, activeWorkspaceId }: UseNo
     if (notificationFilters.mentionsOnly) {
       params.set("mentionsOnly", "true");
     }
-    const data = await workbenchApi.getNotifications(api, params.toString());
-    setNotifications(data.notifications || []);
-    setUnreadCount(data.unreadCount || 0);
+    return workbenchApi.getNotifications(api, params.toString());
   }, [api, notificationFilters]);
 
+  const notificationsQuery = useQuery({
+    queryKey: notificationsQueryKey,
+    queryFn: fetchNotifications,
+    enabled: authed && Boolean(activeWorkspaceId),
+  });
+
+  const preferencesQuery = useQuery({
+    queryKey: workbenchQueryKeys.notificationPreferences,
+    queryFn: () => workbenchApi.getNotificationPreferences(api),
+    enabled: authed && Boolean(activeWorkspaceId),
+  });
+
+  const notifications = notificationsQuery.data?.notifications || [];
+  const unreadCount = notificationsQuery.data?.unreadCount || 0;
+
+  const incomingMutedTypes = preferencesQuery.data?.mutedTypes;
+  useEffect(() => {
+    if (incomingMutedTypes) {
+      queueMicrotask(() => setMutedTypes(incomingMutedTypes));
+    }
+  }, [incomingMutedTypes]);
+
+  const disconnectStream = useCallback(() => {
+    realtimeClientRef.current.release();
+  }, []);
+
+  const pushNotification = useCallback((notification: Notification) => {
+    if (mutedTypes.includes(notification.type)) {
+      return;
+    }
+    if (!matchesRealtimeNotificationFilters(notification, notificationFilters)) {
+      return;
+    }
+    queryClient.setQueryData(notificationsQueryKey, (current: { notifications?: Notification[]; unreadCount?: number } | undefined) => {
+      const existing = current || { notifications: [], unreadCount: 0 };
+      if ((existing.notifications || []).some((item) => item.id === notification.id)) {
+        return existing;
+      }
+      return {
+        ...existing,
+        notifications: [notification, ...(existing.notifications || [])].slice(0, 50),
+        unreadCount: notification.read ? (existing.unreadCount || 0) : (existing.unreadCount || 0) + 1,
+      };
+    });
+  }, [mutedTypes, notificationFilters, notificationsQueryKey, queryClient]);
+
+  const connectStream = useCallback(() => {
+    if (!authed || !activeWorkspaceId) {
+      return;
+    }
+    realtimeClientRef.current.retain();
+  }, [activeWorkspaceId, authed]);
+
+  useEffect(() => {
+    if (!authed || !activeWorkspaceId) {
+      return;
+    }
+    const unsubscribeNotification = realtimeClientRef.current.subscribe("notification", (payload) => {
+      if (payload) {
+        pushNotification(payload as Notification);
+      }
+    });
+    return () => {
+      unsubscribeNotification();
+    };
+  }, [activeWorkspaceId, authed, pushNotification]);
+
+  const loadNotifications = useCallback(async () => {
+    await fetchFreshQuery(queryClient, { queryKey: notificationsQueryKey, queryFn: fetchNotifications });
+  }, [fetchNotifications, notificationsQueryKey, queryClient]);
+
   const loadNotificationPreferences = useCallback(async () => {
-    const data = await workbenchApi.getNotificationPreferences(api);
-    setMutedTypes(data.mutedTypes || []);
-  }, [api]);
+    await fetchFreshQuery(queryClient, {
+      queryKey: workbenchQueryKeys.notificationPreferences,
+      queryFn: () => workbenchApi.getNotificationPreferences(api),
+    });
+  }, [api, queryClient]);
 
   const markNotificationRead = useCallback(async (notificationId: number) => {
     await workbenchApi.markNotificationRead(api, Number(notificationId));
-    setNotifications((prev) => prev.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
-    setUnreadCount((prev) => Math.max(0, prev - 1));
-  }, [api]);
+    queryClient.setQueryData(notificationsQueryKey, (current: { notifications?: Notification[]; unreadCount?: number } | undefined) => {
+      if (!current) {
+        return current;
+      }
+      const wasUnread = (current.notifications || []).some((item) => item.id === notificationId && !item.read);
+      return {
+        ...current,
+        notifications: (current.notifications || []).map((item) => (item.id === notificationId ? { ...item, read: true } : item)),
+        unreadCount: wasUnread ? Math.max(0, (current.unreadCount || 0) - 1) : (current.unreadCount || 0),
+      };
+    });
+  }, [api, notificationsQueryKey, queryClient]);
 
   const markAllNotificationsRead = useCallback(async () => {
     await workbenchApi.markAllNotificationsRead(api);
-    setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
-    setUnreadCount(0);
-  }, [api]);
+    queryClient.setQueryData(notificationsQueryKey, (current: { notifications?: Notification[]; unreadCount?: number } | undefined) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        notifications: (current.notifications || []).map((item) => ({ ...item, read: true })),
+        unreadCount: 0,
+      };
+    });
+  }, [api, notificationsQueryKey, queryClient]);
 
   const saveMutedTypes = useCallback(async () => {
     const res = await workbenchApi.saveNotificationPreferences(api, mutedTypes);
+    queryClient.setQueryData(workbenchQueryKeys.notificationPreferences, res);
     setMutedTypes(res.mutedTypes || []);
+    await queryClient.invalidateQueries({ queryKey: ["workbench", "notifications"] });
     await loadNotifications();
-  }, [api, loadNotifications, mutedTypes]);
+  }, [api, loadNotifications, mutedTypes, queryClient]);
 
   const toggleMutedType = useCallback((value: string) => {
     setMutedTypes((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]));
@@ -173,21 +216,27 @@ export function useNotificationManager({ api, authed, activeWorkspaceId }: UseNo
   }, [notificationPanelOpen, closeUtilityPanel]);
 
   const deleteNotification = useCallback((id: number) => {
-    const wasUnread = notifications.find((n) => n.id === id && !n.read);
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
-    if (wasUnread) {
-      setUnreadCount((prev) => Math.max(0, prev - 1));
-    }
-  }, [notifications]);
+    queryClient.setQueryData(notificationsQueryKey, (current: { notifications?: Notification[]; unreadCount?: number } | undefined) => {
+      if (!current) {
+        return current;
+      }
+      const wasUnread = (current.notifications || []).some((item) => item.id === id && !item.read);
+      return {
+        ...current,
+        notifications: (current.notifications || []).filter((item) => item.id !== id),
+        unreadCount: wasUnread ? Math.max(0, (current.unreadCount || 0) - 1) : (current.unreadCount || 0),
+      };
+    });
+  }, [notificationsQueryKey, queryClient]);
 
   const resetNotificationState = useCallback(() => {
     disconnectStream();
-    setNotifications([]);
-    setUnreadCount(0);
+    queryClient.removeQueries({ queryKey: ["workbench", "notifications"] });
+    queryClient.removeQueries({ queryKey: workbenchQueryKeys.notificationPreferences });
     setNotificationPanelOpen(false);
     setNotificationFilters(DEFAULT_NOTIFICATION_FILTERS);
     setMutedTypes([]);
-  }, [disconnectStream]);
+  }, [disconnectStream, queryClient]);
 
   return {
     notifications,

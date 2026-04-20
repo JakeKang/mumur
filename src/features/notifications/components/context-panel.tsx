@@ -1,7 +1,7 @@
 import { Button } from "@/shared/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/components/ui/card";
 import { PriorityBadge } from "@/shared/components/ui/priority-badge";
-import { categoryLabel, notificationTypeLabel } from "@/shared/constants/ui-labels";
+import { categoryLabel, notificationReadLabel, notificationTypeLabel } from "@/shared/constants/ui-labels";
 import { useMemo, useState } from "react";
 
 function ideaPriorityLevel(idea) {
@@ -30,6 +30,10 @@ function StatTile({ label, value }) {
   );
 }
 
+function isInvitationNotification(type) {
+  return type === "team.invitation.pending" || type === "team.invitation.accepted" || type === "team.invitation.cancelled";
+}
+
 export function ContextPanel({
   activePage,
   selectedIdea,
@@ -48,11 +52,12 @@ export function ContextPanel({
   notifications,
   markNotificationRead,
   deleteNotification,
-  formatTime
+  formatTime,
 }) {
   const [notificationSort, setNotificationSort] = useState("recent");
 
   const unreadCount = notifications.filter((item) => !item.read).length;
+  const pendingInvitationCount = notifications.filter((item) => item.type === "team.invitation.pending" && !item.read).length;
   const selectedIdeaPriority = ideaPriorityLevel(selectedIdea);
 
   const sortedNotifications = useMemo(() => {
@@ -81,10 +86,29 @@ export function ContextPanel({
     if (item.type === "mention.created") {
       return "high";
     }
-    if (!item.read) {
-      return "medium";
+    if (item.type === "team.invitation.pending") {
+      return item.read ? "neutral" : "high";
     }
-    return "low";
+    if (item.type === "team.invitation.accepted" || item.type === "team.invitation.cancelled") {
+      return item.read ? "neutral" : "medium";
+    }
+    return item.read ? "neutral" : "medium";
+  };
+
+  const notificationStateLabel = (item) => {
+    if (item.type === "mention.created") {
+      return "내 멘션";
+    }
+    if (item.type === "team.invitation.pending") {
+      return item.read ? "확인함" : "응답 필요";
+    }
+    if (item.type === "team.invitation.accepted") {
+      return item.read ? "확인함" : "수락됨";
+    }
+    if (item.type === "team.invitation.cancelled") {
+      return item.read ? "확인함" : "취소됨";
+    }
+    return notificationReadLabel(Boolean(item.read));
   };
 
   return (
@@ -135,8 +159,8 @@ export function ContextPanel({
               <CardTitle className="text-sm">알림 개요</CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-3 gap-2 pt-2">
-              <StatTile label="안읽음" value={unreadCount} />
-              <StatTile label="뮤트" value={mutedTypes.length} />
+              <StatTile label="읽지 않음" value={unreadCount} />
+              <StatTile label="초대 대기" value={pendingInvitationCount} />
               <StatTile label="아이디어" value={dashboard?.metrics?.totalIdeas || 0} />
             </CardContent>
           </Card>
@@ -167,7 +191,7 @@ export function ContextPanel({
                     checked={notificationFilters.unreadOnly}
                     onChange={(event) => setNotificationFilters((prev) => ({ ...prev, unreadOnly: event.target.checked }))}
                   />
-                  안읽음만
+                  읽지 않은 알림만
                 </label>
                 <label>
                   <input
@@ -194,7 +218,7 @@ export function ContextPanel({
                   필터 적용
                 </Button>
                 <Button variant="outline" size="sm" onClick={markAllNotificationsRead}>
-                  모두 읽음
+                  모두 읽음 처리
                 </Button>
               </div>
             </CardContent>
@@ -239,10 +263,11 @@ export function ContextPanel({
                     className={`rounded px-2 py-1 text-[11px] ${notificationSort === "priority" ? "bg-[var(--surface)] font-semibold text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"}`}
                     onClick={() => setNotificationSort("priority")}
                   >
-                    우선순위
+                    먼저 확인
                   </button>
                 </div>
               </div>
+              <p className="text-xs text-[var(--muted)]">내 멘션, 응답이 필요한 초대, 읽지 않은 알림을 먼저 보여줍니다.</p>
             </CardHeader>
             <CardContent className="grid gap-2 pt-2">
               {sortedNotifications.length ? (
@@ -261,9 +286,14 @@ export function ContextPanel({
                     >
                       <div className="mb-1 flex flex-wrap items-center gap-1.5">
                         <span className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">{notificationTypeLabel(item.type)}</span>
-                        <PriorityBadge level={notificationPriorityLevel(item)} />
+                        <PriorityBadge level={notificationPriorityLevel(item)} label={notificationStateLabel(item)} />
+                        {isInvitationNotification(item.type) ? (
+                          <span className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700">
+                            팀 초대
+                          </span>
+                        ) : null}
                       </div>
-                      <p className="text-sm font-medium text-[var(--foreground)]">{item.message}</p>
+                      <p className="text-sm font-medium text-[var(--foreground)]">{item.message || notificationTypeLabel(item.type)}</p>
                       <p className="text-xs text-[var(--muted)]">{formatTime(item.createdAt)}</p>
                     </button>
                     <div className="mt-1.5 flex gap-1 opacity-0 transition-opacity group-hover/notif:opacity-100">
@@ -274,7 +304,7 @@ export function ContextPanel({
                           className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] transition"
                           title="읽음 처리"
                         >
-                          ✓ 읽음
+                          ✓ 읽음 처리
                         </button>
                       )}
                       {deleteNotification && (
