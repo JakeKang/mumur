@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/shared/lib/api-client";
+import { reportClientIssue } from "@/shared/lib/observability";
 import type { Idea, Session } from "@/shared/types";
 import * as workbenchApi from "@/modules/workbench/infrastructure/workbench-api";
+import { resetWorkbenchUrl } from "@/modules/workbench/application/workbench-browser";
 
 type UseAuthSessionParams = {
   api: workbenchApi.WorkbenchApiClient;
@@ -17,18 +19,11 @@ type UseAuthSessionParams = {
   setIdeas: React.Dispatch<React.SetStateAction<Idea[]>>;
   setSelectedIdeaId: React.Dispatch<React.SetStateAction<string | null>>;
   setDetailNotFound: React.Dispatch<React.SetStateAction<{ ideaId: string; message: string } | null>>;
-  loadDashboard: () => Promise<void>;
   loadIdeas: () => Promise<Idea[]>;
   selectIdea: (
     ideaId: number | string,
     options?: { syncUrl?: boolean; openPage?: boolean; workspaceId?: number | null }
   ) => Promise<void>;
-  loadNotifications: () => Promise<void>;
-  loadNotificationPreferences: () => Promise<void>;
-  loadWebhooks: () => Promise<void>;
-  loadUserTeams: () => Promise<void>;
-  loadTeamMembers: () => Promise<void>;
-  loadTeamInvitations: () => Promise<void>;
   connectStream: () => void;
   disconnectStream: () => void;
   resetTeamState: () => void;
@@ -51,15 +46,8 @@ export function useAuthSession({
   setIdeas,
   setSelectedIdeaId,
   setDetailNotFound,
-  loadDashboard,
   loadIdeas,
   selectIdea,
-  loadNotifications,
-  loadNotificationPreferences,
-  loadWebhooks,
-  loadUserTeams,
-  loadTeamMembers,
-  loadTeamInvitations,
   connectStream,
   disconnectStream,
   resetTeamState,
@@ -75,15 +63,6 @@ export function useAuthSession({
       const me = await workbenchApi.getAuthMe(api);
       setSession(me);
 
-      await Promise.all([
-        loadDashboard(),
-        loadNotifications(),
-        loadNotificationPreferences(),
-        loadWebhooks(),
-        loadUserTeams(),
-        loadTeamMembers(),
-        loadTeamInvitations(),
-      ]);
       const loadedIdeas = await loadIdeas();
       if (loadedIdeas.length) {
         const requestedIdea = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("idea") : null;
@@ -124,6 +103,7 @@ export function useAuthSession({
         setError(err.message || "로그인이 필요합니다");
         disconnectStream();
       } else {
+        reportClientIssue("auth-session", "bootstrap failed", { error: err });
         setError(err instanceof Error ? err.message : "요청 처리에 실패했습니다");
       }
       setAuthChecked(true);
@@ -132,14 +112,7 @@ export function useAuthSession({
     api,
     clearDetailState,
     disconnectStream,
-    loadDashboard,
     loadIdeas,
-    loadNotificationPreferences,
-    loadNotifications,
-    loadTeamInvitations,
-    loadTeamMembers,
-    loadUserTeams,
-    loadWebhooks,
     selectIdea,
     setActivePage,
     setDetailNotFound,
@@ -190,11 +163,10 @@ export function useAuthSession({
       resetWorkspaceList();
       resetNotificationState();
       setActivePage("dashboard");
-      if (typeof window !== "undefined") {
-        window.history.replaceState(null, "", "/");
-      }
+      resetWorkbenchUrl();
       disconnectStream();
     } catch (err) {
+      reportClientIssue("auth-session", "logout failed", { error: err });
       setError(err instanceof Error ? err.message : "로그아웃에 실패했습니다");
     } finally {
       setBusy(false);
@@ -227,6 +199,7 @@ export function useAuthSession({
           await workbenchApi.switchWorkspace(api, workspaceId);
           await bootstrap();
         } catch (err) {
+          reportClientIssue("auth-session", "workspace enter failed", { error: err, workspaceId });
           setError(err instanceof Error ? err.message : "워크스페이스 전환에 실패했습니다");
         } finally {
           setBusy(false);
@@ -256,6 +229,7 @@ export function useAuthSession({
         await workbenchApi.switchWorkspace(api, Number(teamId));
         await bootstrap();
       } catch (err) {
+        reportClientIssue("auth-session", "workspace switch failed", { error: err, teamId });
         setError(err instanceof Error ? err.message : "팀 전환에 실패했습니다");
       } finally {
         setBusy(false);

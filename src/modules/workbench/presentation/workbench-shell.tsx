@@ -2,59 +2,61 @@
 
 import type { ReactNode } from "react";
 import { MumurNavigationSidebar } from "@/features/workspace/components/mumur-navigation-sidebar";
-import type { UserWorkspace } from "@/shared/types";
+import type { UserWorkspace, WorkspaceInvitation } from "@/shared/types";
 
 type WorkbenchShellProps = {
   mobileNavOpen: boolean;
-  onOpenMobileNav: () => void;
-  onCloseMobileNav: () => void;
+  onOpenMobileNavAction: () => void;
+  onCloseMobileNavAction: () => void;
   activePage: string;
-  onNavigatePage: (page: string) => void;
+  onNavigatePageAction: (page: string) => void;
   navCollapsed: boolean;
   userName: string;
   workspaceName: string;
   userWorkspaces: UserWorkspace[];
+  pendingInvitations: WorkspaceInvitation[];
   activeWorkspaceId: number | null;
-  onSwitchWorkspace: (id: number) => void;
-  onEnterWorkspace: (id: number) => void;
+  onSwitchWorkspaceAction: (id: number) => void;
+  onEnterWorkspaceAction: (id: number) => void;
   selectedWorkspaceId: number | null;
-  onCreateWorkspace: (data: { name: string; icon: string; color: string }) => Promise<void>;
-  onUpdateWorkspace: (id: number, data: { name: string; icon: string; color: string }) => Promise<void>;
-  onDeleteWorkspace: (id: number) => Promise<void>;
+  onCreateWorkspaceAction: (data: { name: string; icon: string; color: string }) => Promise<void>;
+  onUpdateWorkspaceAction: (id: number, data: { name: string; icon: string; color: string }) => Promise<void>;
+  onDeleteWorkspaceAction: (id: number) => Promise<void>;
   workspaceSwitching: boolean;
-  onToggleNavCollapse: () => void;
-  onEditProfile: () => void;
-  onLogout: () => void;
+  onToggleNavCollapseAction: () => void;
+  onEditProfileAction: () => void;
+  onLogoutAction: () => void;
   children: ReactNode;
   notificationPanelOpen: boolean;
-  onCloseNotificationPanel: () => void;
+  onCloseNotificationPanelAction: () => void;
   notificationPanel: ReactNode;
 };
 
 export function WorkbenchShell({
   mobileNavOpen,
-  onOpenMobileNav,
-  onCloseMobileNav,
+  onOpenMobileNavAction,
+  onCloseMobileNavAction,
   activePage,
-  onNavigatePage,
+  onNavigatePageAction,
   navCollapsed,
   userName,
   workspaceName,
   userWorkspaces,
+  pendingInvitations,
   activeWorkspaceId,
-  onSwitchWorkspace,
-  onEnterWorkspace,
+  onSwitchWorkspaceAction,
+  onEnterWorkspaceAction,
   selectedWorkspaceId,
-  onCreateWorkspace,
-  onUpdateWorkspace,
-  onDeleteWorkspace,
+  onCreateWorkspaceAction,
+  onUpdateWorkspaceAction,
+  onDeleteWorkspaceAction,
   workspaceSwitching,
-  onToggleNavCollapse,
-  onEditProfile,
-  onLogout,
+  onToggleNavCollapseAction,
+  onEditProfileAction,
+  onLogoutAction,
   children,
   notificationPanelOpen,
-  onCloseNotificationPanel,
+  onCloseNotificationPanelAction,
   notificationPanel,
 }: WorkbenchShellProps) {
   return (
@@ -62,7 +64,7 @@ export function WorkbenchShell({
       <div className="relative flex h-screen overflow-hidden bg-[var(--surface)]">
         <button
           type="button"
-          onClick={onOpenMobileNav}
+          onClick={onOpenMobileNavAction}
           className="fixed left-3 top-3 z-40 flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)] shadow md:hidden"
           aria-label="메뉴 열기"
         >
@@ -74,7 +76,7 @@ export function WorkbenchShell({
             type="button"
             className="fixed inset-0 z-40 bg-black/40 md:hidden"
             aria-label="메뉴 닫기"
-            onClick={onCloseMobileNav}
+            onClick={onCloseMobileNavAction}
           />
         ) : null}
 
@@ -89,30 +91,31 @@ export function WorkbenchShell({
           <MumurNavigationSidebar
             activePage={activePage}
             onNavigate={(page) => {
-              onNavigatePage(page);
-              onCloseMobileNav();
+              onNavigatePageAction(page);
+              onCloseMobileNavAction();
             }}
             collapsed={navCollapsed}
             userName={userName}
             workspaceName={workspaceName}
             userWorkspaces={userWorkspaces}
+            pendingInvitations={pendingInvitations}
             activeWorkspaceId={activeWorkspaceId}
             onSwitchWorkspace={(id) => {
-              onSwitchWorkspace(id);
-              onCloseMobileNav();
+              onSwitchWorkspaceAction(id);
+              onCloseMobileNavAction();
             }}
             onEnterWorkspace={(id) => {
-              onEnterWorkspace(id);
-              onCloseMobileNav();
+              onEnterWorkspaceAction(id);
+              onCloseMobileNavAction();
             }}
             selectedWorkspaceId={selectedWorkspaceId}
-            onCreateWorkspace={onCreateWorkspace}
-            onUpdateWorkspace={onUpdateWorkspace}
-            onDeleteWorkspace={onDeleteWorkspace}
+            onCreateWorkspace={onCreateWorkspaceAction}
+            onUpdateWorkspace={onUpdateWorkspaceAction}
+            onDeleteWorkspace={onDeleteWorkspaceAction}
             switchingWorkspace={workspaceSwitching}
-            onToggleCollapse={onToggleNavCollapse}
-            onEditProfile={onEditProfile}
-            onLogout={onLogout}
+            onToggleCollapse={onToggleNavCollapseAction}
+            onEditProfile={onEditProfileAction}
+            onLogout={onLogoutAction}
           />
         </div>
 
@@ -127,7 +130,7 @@ export function WorkbenchShell({
             type="button"
             className="absolute inset-0 h-full w-full bg-slate-950/40"
             aria-label="알림 패널 닫기"
-            onClick={onCloseNotificationPanel}
+            onClick={onCloseNotificationPanelAction}
           />
           <div className="absolute right-0 top-0 h-full w-full max-w-xl overflow-auto border-l border-[var(--border)] bg-[var(--surface)] p-4 shadow-2xl">
             {notificationPanel}
