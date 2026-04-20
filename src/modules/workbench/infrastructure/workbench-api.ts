@@ -1,6 +1,16 @@
 import type { apiRequest } from "@/shared/lib/api-client";
+import type { IdeaStatus } from "@/shared/types";
 
 export type WorkbenchApiClient = typeof apiRequest;
+
+export type UpdateIdeaPayload = {
+  title: string;
+  category: string;
+  status: IdeaStatus;
+  priority: "low" | "medium" | "high";
+  blocks: Array<{ id: string; type: string; content: string; checked: boolean }>;
+  baseUpdatedAt: number;
+};
 
 export async function getAuthMe(api: WorkbenchApiClient) {
   return api("/api/auth/me");
@@ -74,6 +84,10 @@ export async function getWorkspaceInvitations(api: WorkbenchApiClient) {
   return api("/api/workspace/invitations");
 }
 
+export async function previewWorkspaceInvitation(api: WorkbenchApiClient, email: string) {
+  return api(`/api/workspace/invitations/preview?email=${encodeURIComponent(email)}`);
+}
+
 export async function createWorkspaceInvitation(
   api: WorkbenchApiClient,
   payload: { email: string; role: string }
@@ -90,6 +104,14 @@ export async function retryWorkspaceInvitation(api: WorkbenchApiClient, invitati
 
 export async function cancelWorkspaceInvitation(api: WorkbenchApiClient, invitationId: number) {
   return api(`/api/workspace/invitations/${invitationId}`, { method: "DELETE" });
+}
+
+export async function acceptWorkspaceInvitation(api: WorkbenchApiClient, invitationId: number) {
+  return api(`/api/workspace/invitations/${invitationId}/accept`, { method: "POST" });
+}
+
+export async function declineWorkspaceInvitation(api: WorkbenchApiClient, invitationId: number) {
+  return api(`/api/workspace/invitations/${invitationId}/decline`, { method: "POST" });
 }
 
 export async function getWorkspaces(api: WorkbenchApiClient) {
@@ -140,12 +162,27 @@ export async function getIdea(api: WorkbenchApiClient, ideaId: string | number) 
   return api(`/api/ideas/${ideaId}`);
 }
 
+export async function getIdeaCollabCheckpoint(api: WorkbenchApiClient, ideaId: string | number) {
+  return api(`/api/ideas/${ideaId}/collab/checkpoint`);
+}
+
 export async function createIdea(api: WorkbenchApiClient, payload: object) {
   return api("/api/ideas", { method: "POST", body: JSON.stringify(payload) });
 }
 
-export async function updateIdea(api: WorkbenchApiClient, ideaId: string | number, payload: object) {
+export async function updateIdea(api: WorkbenchApiClient, ideaId: string | number, payload: UpdateIdeaPayload) {
   return api(`/api/ideas/${ideaId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function saveIdeaCollabCheckpoint(
+  api: WorkbenchApiClient,
+  ideaId: string | number,
+  payload: { title: string; blocks: Array<{ id: string; type: string; content: string; checked: boolean }>; baseUpdatedAt: number }
+) {
+  return api(`/api/ideas/${ideaId}/collab/checkpoint`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
@@ -162,7 +199,7 @@ export async function getIdeaComments(api: WorkbenchApiClient, ideaId: string | 
 export async function createIdeaComment(
   api: WorkbenchApiClient,
   ideaId: string | number,
-  payload: { content: string; blockId: string }
+  payload: { content: string; blockId: string; parentId?: number | null }
 ) {
   return api(`/api/ideas/${ideaId}/comments`, {
     method: "POST",
@@ -226,12 +263,29 @@ export async function uploadIdeaBlockFile(
   api: WorkbenchApiClient,
   ideaId: string | number,
   blockId: string,
-  file: File
+  file: File,
+  baseUpdatedAt: number
 ) {
   const form = new FormData();
   form.append("file", file);
+  form.append("baseUpdatedAt", String(baseUpdatedAt));
   return api(`/api/ideas/${ideaId}/blocks/${blockId}/file`, {
     method: "POST",
     body: form,
+  });
+}
+
+export async function getIdeaPresence(api: WorkbenchApiClient, ideaId: string | number) {
+  return api(`/api/ideas/${ideaId}/presence`);
+}
+
+export async function updateIdeaPresence(
+  api: WorkbenchApiClient,
+  ideaId: string | number,
+  payload: { blockId?: string; cursorOffset?: number | null; typing?: boolean }
+) {
+  return api(`/api/ideas/${ideaId}/presence`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
