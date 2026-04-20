@@ -5,9 +5,9 @@
   "version": "1.0.0",
   "description": "Mumur MVP web application",
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "tsx watch server.ts",
     "build": "next build",
-    "start": "next start -p 3001",
+    "start": "NODE_ENV=production tsx server.ts",
     "lint": "eslint",
     "seed:local": "tsx src/db/seeds/seed-local-account.ts",
     "pg:schema": "psql \"$DATABASE_URL\" -f src/db/schema.sql",
@@ -19,12 +19,18 @@
     "pg:rollback-drill": "tsx src/db/migrations/rollback-drill.ts",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
+    "test:unit": "vitest run",
+    "test:security": "playwright test e2e/auth.spec.ts e2e/security-api.spec.ts",
+    "test:collab-live": "NEXT_PUBLIC_ENABLE_IDEA_COLLAB=true SESSION_SECRET=test-session-secret playwright test e2e/collab-socket.spec.ts -g \"authorized clients receive broadcast collaboration updates|two collaboration clients converge title updates in realtime\"",
+    "test:rollback-collab": "NEXT_PUBLIC_ENABLE_IDEA_COLLAB=false playwright test e2e/idea-thread.spec.ts -g \"editor loads with idea title and blocks editable|idea title can be updated via editor\"",
+    "release:verify": "pnpm run check && pnpm run test:unit && pnpm run test:security && pnpm run test:collab-live && pnpm test && pnpm run build && pnpm run pg:dry-run && pnpm run pg:e2e && pnpm run pg:rollback-drill && pnpm run test:rollback-collab",
     "check": "pnpm run typecheck && pnpm run lint"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@tanstack/react-query": "^5.95.2",
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -36,7 +42,9 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "tailwind-merge": "^3.5.0",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "ws": "^8.20.0",
+    "yjs": "^13.6.30"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
@@ -46,12 +54,14 @@
     "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "pg-mem": "^3.0.14",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
