@@ -19,19 +19,19 @@
 
 ## 핵심 기능
 
-| 기능 | 설명 |
-|------|------|
+| 기능                     | 설명                                                                                   |
+| ------------------------ | -------------------------------------------------------------------------------------- |
 | **Markdown 블록 에디터** | Enter로 블록 확정, 클릭으로 재편집. 9가지 블록 타입, hover 메뉴, 드래그 정렬, 자동저장 |
-| **아이디어 생애주기** | 씨앗 → 발아 → 성장 → 결실 → 휴면 5단계 상태 흐름 |
-| **워크스페이스** | 다중 워크스페이스 생성·전환, 아이콘·색상 커스터마이징 |
-| **권한 관리** | viewer / editor / deleter / admin 중심 + owner/member 호환 역할 체계 |
-| **블록 단위 협업** | 블록별 댓글 스레드, 이모지 리액션, 토론 스레드(진행·해결·보류) |
-| **버전 이력** | 자동 스냅샷(5분 간격) + 수동 버전 등록, 원클릭 복원 |
-| **실시간 presence** | SSE 기반 팀원 접속 현황 브로드캐스트 |
-| **알림 인박스** | 실시간 SSE 스트림, 멘션·댓글·투표 알림, 뮤트 설정 |
-| **파일 블록** | 에디터 내부에서 파일 첨부 및 표시 |
-| **모바일 반응형** | 사이드바 드로어 전환, 터치 대체 UX |
-| **웹훅 연동** | Slack / Discord 웹훅 설정 및 전송 이력 조회 |
+| **아이디어 생애주기**    | 씨앗 → 발아 → 성장 → 결실 → 휴면 5단계 상태 흐름                                       |
+| **워크스페이스**         | 다중 워크스페이스 생성·전환, 아이콘·색상 커스터마이징                                  |
+| **권한 관리**            | viewer / editor / deleter / admin 중심 + owner/member 호환 역할 체계                   |
+| **블록 단위 협업**       | 블록별 댓글 스레드, 이모지 리액션, 토론 스레드(진행·해결·보류)                         |
+| **버전 이력**            | 자동 스냅샷(5분 간격) + 수동 버전 등록, 원클릭 복원                                    |
+| **실시간 presence**      | SSE 기반 팀원 접속 현황 브로드캐스트                                                   |
+| **알림 인박스**          | 실시간 SSE 스트림, 멘션·댓글·투표 알림, 뮤트 설정                                      |
+| **파일 블록**            | 에디터 내부에서 파일 첨부 및 표시                                                      |
+| **모바일 반응형**        | 사이드바 드로어 전환, 터치 대체 UX                                                     |
+| **웹훅 연동**            | Slack / Discord 웹훅 설정 및 전송 이력 조회                                            |
 
 ---
 
@@ -39,13 +39,13 @@
 
 아이디어는 아래 5단계 흐름으로 성장합니다.
 
-| 단계 | 식별자 | 의미 |
-|:---:|--------|------|
-| 🌰 | `seed` | 씨앗 — 처음 떠오른 원석 아이디어 |
-| 🌱 | `sprout` | 발아 — 방향이 잡히기 시작한 단계 |
-| 🌿 | `grow` | 성장 — 구체화·실행 검토 중 |
-| 🍎 | `harvest` | 결실 — 완성·출시·배포 완료 |
-| 🌙 | `rest` | 휴면 — 보류·아카이브 처리 |
+| 단계 | 식별자    | 의미                             |
+| :--: | --------- | -------------------------------- |
+|  🌰  | `seed`    | 씨앗 — 처음 떠오른 원석 아이디어 |
+|  🌱  | `sprout`  | 발아 — 방향이 잡히기 시작한 단계 |
+|  🌿  | `grow`    | 성장 — 구체화·실행 검토 중       |
+|  🍎  | `harvest` | 결실 — 완성·출시·배포 완료       |
+|  🌙  | `rest`    | 휴면 — 보류·아카이브 처리        |
 
 ---
 
@@ -60,7 +60,7 @@ pnpm run seed:local
 pnpm dev
 ```
 
-앱: `http://127.0.0.1:3001` · 테스트 계정: `localtester@mumur.local / mumur1234!`
+앱: `http://127.0.0.1:3100` · 테스트 계정: `localtester@mumur.local / mumur1234!`
 
 ### Docker Compose로 로컬 실행 (앱 + PostgreSQL)
 
@@ -68,7 +68,7 @@ pnpm dev
 docker compose up --build
 ```
 
-- 앱: `http://127.0.0.1:3001`
+- 앱: `http://127.0.0.1:3100`
 - PostgreSQL: `127.0.0.1:5432` (`mumur/mumur`, DB `mumur`)
 
 > 현재 앱 런타임 기본 DB는 SQLite(`NEXT_DB_PATH`)이며, Compose는 PostgreSQL을 함께 띄워 전환 테스트/마이그레이션까지 한 번에 준비합니다.
@@ -77,27 +77,34 @@ docker compose up --build
 
 ## 기술 스택
 
-| 영역 | 기술 |
-|------|------|
-| 프레임워크 | [Next.js 16](https://nextjs.org) (App Router) |
-| 언어 | TypeScript 5 |
-| 스타일 | [Tailwind CSS 4](https://tailwindcss.com) + 커스텀 UI 프리미티브 |
-| DB | [SQLite](https://www.sqlite.org) (`better-sqlite3`) — 별도 서버 없이 즉시 실행, Postgres로 교체 가능 |
-| Markdown | [marked](https://marked.js.org) + [highlight.js](https://highlightjs.org) |
-| E2E 테스트 | [Playwright](https://playwright.dev) v1.58 (17 tests) |
+| 영역       | 기술                                                                                                 |
+| ---------- | ---------------------------------------------------------------------------------------------------- |
+| 프레임워크 | [Next.js 16](https://nextjs.org) (App Router)                                                        |
+| 언어       | TypeScript 5                                                                                         |
+| 스타일     | [Tailwind CSS 4](https://tailwindcss.com) + 커스텀 UI 프리미티브                                     |
+| DB         | [SQLite](https://www.sqlite.org) (`better-sqlite3`) — 별도 서버 없이 즉시 실행, Postgres로 교체 가능 |
+| Markdown   | [marked](https://marked.js.org) + [highlight.js](https://highlightjs.org)                            |
+| E2E 테스트 | [Playwright](https://playwright.dev) v1.58 (17 tests)                                                |
 
 ---
 
 ## 개발 명령
 
 ```bash
-pnpm dev            # 개발 서버 (port 3001)
+pnpm dev            # 개발 서버 (port 3100)
 pnpm run check      # typecheck + lint
+pnpm run test:unit  # Vitest 단위 테스트
+pnpm run test:security # 인증/보안 회귀 게이트 E2E
 pnpm test           # Playwright E2E 실행
+pnpm run test:collab-live # 협업 기능 플래그 ON E2E (NEXT_PUBLIC_ENABLE_IDEA_COLLAB=true)
+pnpm run test:rollback-collab # 협업 기능 플래그 OFF 롤백/폴백 에디터 E2E (NEXT_PUBLIC_ENABLE_IDEA_COLLAB=false)
 pnpm run build      # 프로덕션 빌드
 pnpm run pg:dry-run # pg-mem 기반 SQLite->PostgreSQL 드라이런 + 패리티 체크
 pnpm run pg:e2e     # PostgreSQL 마이그레이션 게이트 + Playwright E2E
+pnpm run pg:validate # SQLite->PostgreSQL 데이터/테이블 패리티 검증
+pnpm run pg:adapter-parity # SQLite/PG 어댑터 쿼리 패리티 검증
 pnpm run pg:rollback-drill # DATABASE_URL 전환/롤백 가드 드릴
+pnpm run release:verify # 최종 릴리즈 게이트(위 커맨드들을 순서대로 실행)
 ```
 
 ---
