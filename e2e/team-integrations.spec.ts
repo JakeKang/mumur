@@ -10,7 +10,7 @@ test("admin can invite member from team page", async ({ page }) => {
   const inviteEmail = `playwright-member-${Date.now()}@mumur.local`;
   await page.getByPlaceholder("초대할 이메일").fill(inviteEmail);
   await page.getByRole("button", { name: "+ 멤버 초대" }).click();
-  await expect(page.getByText(inviteEmail)).toBeVisible();
+  await expect(page.getByText(inviteEmail).first()).toBeVisible();
 });
 
 test("integration panel updates webhook", async ({ page }) => {
@@ -24,5 +24,5 @@ test("integration panel updates webhook", async ({ page }) => {
   const webhookUrl = "https://hooks.slack.com/services/T000/B000/XYZ";
   await page.getByPlaceholder("https://...").fill(webhookUrl);
   await page.getByRole("button", { name: "저장" }).click();
-  await expect(page.getByText(webhookUrl)).toBeVisible();
+  await expect(page.getByText("https://hooks.slack.com/••••")).toBeVisible();
 });

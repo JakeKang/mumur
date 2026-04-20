@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import type { MouseEvent as ReactMouseEvent, FocusEvent as ReactFocusEvent } from "react";
 import type { ReactNode } from "react";
-import type { UserWorkspace } from "@/shared/types";
+import type { UserWorkspace, WorkspaceInvitation } from "@/shared/types";
 import { Button } from "@/shared/components/ui/button";
 import { Input } from "@/shared/components/ui/input";
 import { DialogShell } from "@/shared/components/ui/dialog-shell";
@@ -26,14 +27,41 @@ type TooltipButtonProps = {
   onClick: () => void;
   active?: boolean;
   className?: string;
+  onTooltipShow?: (label: string, rect: DOMRect) => void;
+  onTooltipHide?: () => void;
 };
 
-function TooltipButton({ label, showTooltip, children, onClick, active, className = "" }: TooltipButtonProps) {
+function TooltipButton({
+  label,
+  showTooltip,
+  children,
+  onClick,
+  active,
+  className = "",
+  onTooltipShow,
+  onTooltipHide,
+}: TooltipButtonProps) {
   return (
     <div className="relative group">
       <button
         type="button"
         onClick={onClick}
+        onMouseEnter={(event) => {
+          if (!showTooltip) return;
+          onTooltipShow?.(label, event.currentTarget.getBoundingClientRect());
+        }}
+        onMouseLeave={() => {
+          if (!showTooltip) return;
+          onTooltipHide?.();
+        }}
+        onFocus={(event) => {
+          if (!showTooltip) return;
+          onTooltipShow?.(label, event.currentTarget.getBoundingClientRect());
+        }}
+        onBlur={() => {
+          if (!showTooltip) return;
+          onTooltipHide?.();
+        }}
         aria-label={label}
         title={label}
         className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-all duration-150 ${
@@ -42,14 +70,15 @@ function TooltipButton({ label, showTooltip, children, onClick, active, classNam
       >
         {children}
       </button>
-      {showTooltip && (
-        <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--foreground)] px-2 py-1 text-xs text-[var(--surface)] opacity-0 transition-opacity group-hover:opacity-100">
-          {label}
-        </span>
-      )}
     </div>
   );
 }
+
+type FloatingTooltipState = {
+  label: string;
+  top: number;
+  left: number;
+};
 
 type WorkspaceDialogState = {
   mode: "create" | "edit";
@@ -66,6 +95,7 @@ type MumurNavigationSidebarProps = {
   userName: string;
   workspaceName: string;
   userWorkspaces: UserWorkspace[];
+  pendingInvitations: WorkspaceInvitation[];
   activeWorkspaceId: number | null;
   onSwitchWorkspace: (id: number) => void;
   onEnterWorkspace?: (id: number) => void;
@@ -86,6 +116,7 @@ export function MumurNavigationSidebar({
   userName: _userName,
   workspaceName: _workspaceName,
   userWorkspaces,
+  pendingInvitations,
   activeWorkspaceId,
   onSwitchWorkspace,
   onEnterWorkspace,
@@ -101,6 +132,7 @@ export function MumurNavigationSidebar({
   const [wsDialog, setWsDialog] = useState<WorkspaceDialogState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UserWorkspace | null>(null);
   const [busy, setBusy] = useState(false);
+  const [floatingTooltip, setFloatingTooltip] = useState<FloatingTooltipState | null>(null);
   const navItems = [
     { id: "dashboard", icon: "🏠", label: "대시보드" },
     { id: "ideas",     icon: "💡", label: "전체 아이디어" },
@@ -108,6 +140,42 @@ export function MumurNavigationSidebar({
   ];
 
   const sidebarWidth = collapsed ? "w-14" : "w-60";
+  const pendingInvitationLabel = pendingInvitations.length === 1
+    ? "대기 중인 초대 1개"
+    : `대기 중인 초대 ${pendingInvitations.length}개`;
+
+  function showFloatingTooltip(label: string, rect: DOMRect) {
+    setFloatingTooltip({
+      label,
+      top: rect.top + rect.height / 2,
+      left: rect.right + 8,
+    });
+  }
+
+  function hideFloatingTooltip() {
+    setFloatingTooltip((current) => current ? null : current);
+  }
+
+  function getTooltipHandlers(label: string) {
+    if (!collapsed) {
+      return {};
+    }
+
+    return {
+      onMouseEnter: (event: ReactMouseEvent<HTMLElement>) => {
+        showFloatingTooltip(label, event.currentTarget.getBoundingClientRect());
+      },
+      onMouseLeave: () => {
+        hideFloatingTooltip();
+      },
+      onFocus: (event: ReactFocusEvent<HTMLElement>) => {
+        showFloatingTooltip(label, event.currentTarget.getBoundingClientRect());
+      },
+      onBlur: () => {
+        hideFloatingTooltip();
+      }
+    };
+  }
 
   function openCreate() {
     setWsDialog({ mode: "create", name: "", icon: "📁", color: "#6366f1" });
@@ -153,7 +221,7 @@ export function MumurNavigationSidebar({
           )}
         </div>
 
-        <div className="flex-1 overflow-auto px-2 pb-4">
+        <div className={`flex-1 overflow-y-auto overflow-x-hidden pb-4 ${collapsed ? "px-1" : "px-2"}`}>
           {!collapsed && (
             <p className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
               메뉴
@@ -168,6 +236,8 @@ export function MumurNavigationSidebar({
                 active={activePage === item.id}
                 onClick={() => onNavigate(item.id)}
                 className={collapsed ? "justify-center" : "justify-start"}
+                onTooltipShow={showFloatingTooltip}
+                onTooltipHide={hideFloatingTooltip}
               >
                 <span className="w-5 shrink-0 text-center text-base">{item.icon}</span>
                 {!collapsed && <span>{item.label}</span>}
@@ -188,14 +258,10 @@ export function MumurNavigationSidebar({
                   aria-label="새 워크스페이스"
                   title="새 워크스페이스"
                   className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] transition text-xs"
+                  {...getTooltipHandlers("새 워크스페이스")}
                 >
                   +
                 </button>
-                {collapsed && (
-                  <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--foreground)] px-2 py-1 text-xs text-[var(--surface)] opacity-0 transition-opacity group-hover:opacity-100">
-                    새 워크스페이스
-                  </span>
-                )}
               </div>
             </div>
 
@@ -218,6 +284,7 @@ export function MumurNavigationSidebar({
                           ? "bg-[var(--accent)]/10 font-semibold text-[var(--accent)]"
                           : "text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
                       } ${collapsed ? "justify-center" : "justify-start"} ${switchingWorkspace ? "opacity-70 cursor-wait" : ""}`}
+                      {...getTooltipHandlers(ws.name)}
                     >
                       <span
                         className="w-5 shrink-0 text-center text-sm leading-none"
@@ -250,12 +317,6 @@ export function MumurNavigationSidebar({
                         </button>
                       </div>
                     )}
-
-                    {collapsed && (
-                      <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--foreground)] px-2 py-1 text-xs text-[var(--surface)] opacity-0 transition-opacity group-hover/ws:opacity-100">
-                        {ws.name}
-                      </span>
-                    )}
                   </div>
                 );
               })}
@@ -274,6 +335,52 @@ export function MumurNavigationSidebar({
               {switchingWorkspace && !collapsed ? (
                 <p className="px-2 pt-1 text-[10px] text-[var(--muted)]">워크스페이스 전환 중...</p>
               ) : null}
+
+              {collapsed && pendingInvitations.length ? (
+                <TooltipButton
+                  label={pendingInvitationLabel}
+                  showTooltip
+                  onClick={() => {
+                    hideFloatingTooltip();
+                    onToggleCollapse();
+                  }}
+                  className="justify-center"
+                  onTooltipShow={showFloatingTooltip}
+                  onTooltipHide={hideFloatingTooltip}
+                >
+                  <span className="relative flex w-5 shrink-0 items-center justify-center text-base">
+                    📨
+                    <span className="absolute -right-2 -top-1 min-w-[16px] rounded-full bg-[var(--accent)] px-1 text-[9px] font-semibold leading-4 text-white">
+                      {pendingInvitations.length > 9 ? "9+" : pendingInvitations.length}
+                    </span>
+                  </span>
+                </TooltipButton>
+              ) : null}
+
+              {!collapsed && pendingInvitations.length ? (
+                <div className="mt-3 space-y-2 px-1">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">대기 중인 초대</p>
+                    <span className="rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
+                      {pendingInvitations.length}
+                    </span>
+                  </div>
+              {pendingInvitations.map((invitation) => (
+                <div key={invitation.id} className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-2 py-2">
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 text-sm" style={{ color: invitation.teamColor ?? "#6366f1" }}>
+                      {invitation.teamIcon ?? "📁"}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-semibold text-[var(--foreground)]">{invitation.teamName || invitation.email}</p>
+                      <p className="text-[11px] text-[var(--muted)]">{`역할 ${invitation.role} · 초대자 ${invitation.invitedByName || "관리자"}`}</p>
+                      <p className="mt-1 text-[11px] text-[var(--muted)]">{invitation.message || "초대 알림입니다."}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -281,7 +388,10 @@ export function MumurNavigationSidebar({
         <div className="flex items-center justify-center border-t border-[var(--border)] py-2">
           <button
             type="button"
-            onClick={onToggleCollapse}
+            onClick={() => {
+              hideFloatingTooltip();
+              onToggleCollapse();
+            }}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
             aria-label={collapsed ? "사이드바 펼치기" : "사이드바 접기"}
             title={collapsed ? "사이드바 펼치기" : "사이드바 접기"}
@@ -289,6 +399,16 @@ export function MumurNavigationSidebar({
             {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
           </button>
         </div>
+
+        {collapsed && floatingTooltip ? (
+          <div
+            className="pointer-events-none fixed z-[70] -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--foreground)] px-2 py-1 text-xs text-[var(--surface)] shadow-lg"
+            style={{ top: floatingTooltip.top, left: floatingTooltip.left }}
+            aria-hidden="true"
+          >
+            {floatingTooltip.label}
+          </div>
+        ) : null}
       </aside>
 
       {wsDialog && (
