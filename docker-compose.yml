@@ -8,11 +8,11 @@ services:
       POSTGRES_PASSWORD: mumur
       POSTGRES_DB: mumur
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mumur -d mumur"]
+      test: ['CMD-SHELL', 'pg_isready -U mumur -d mumur']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -28,10 +28,10 @@ services:
         condition: service_healthy
     environment:
       NEXT_DB_PATH: /app/data/mumur.db
-      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3001
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3100
       NODE_ENV: production
     ports:
-      - "3001:3001"
+      - '3100:3100'
     volumes:
       - app-data:/app/data
     command: sh -c "pnpm run seed:local && pnpm run start"
