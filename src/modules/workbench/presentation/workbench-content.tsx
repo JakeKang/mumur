@@ -1,4 +1,7 @@
 import type { ComponentProps } from "react";
+import { isIdeaCollabEnabled } from "@/features/ideas/collab/idea-collab-config";
+import { IdeaCollabProvider } from "@/features/ideas/collab/idea-collab-provider";
+import { toIdeaCollabCheckpoint } from "@/features/ideas/collab/idea-collab-checkpoint";
 import { IdeaStudioPanel } from "@/features/ideas/components/idea-studio-panel";
 import { WorkspaceSurface } from "@/features/workspace/components/workspace-surface";
 import { DashboardSurface, IdeasSurface, TeamSurface } from "@/features/workspace/components/workspace-pages";
@@ -35,6 +38,8 @@ export function WorkbenchContent({
   teamProps,
   workspaceProps,
 }: WorkbenchContentProps) {
+  const collabEnabled = isIdeaCollabEnabled();
+
   return (
     <>
       {activePage === "dashboard" ? <DashboardSurface {...dashboardProps} /> : null}
@@ -56,6 +61,14 @@ export function WorkbenchContent({
               목록으로 이동
             </button>
           </section>
+        ) : collabEnabled ? (
+          <IdeaCollabProvider
+            key={detailProps.studioPanelProps.selectedIdea.id}
+            ideaId={detailProps.studioPanelProps.selectedIdea.id}
+            initialSnapshot={toIdeaCollabCheckpoint(detailProps.studioPanelProps.selectedIdea)}
+          >
+            <IdeaStudioPanel {...detailProps.studioPanelProps} />
+          </IdeaCollabProvider>
         ) : (
           <IdeaStudioPanel {...detailProps.studioPanelProps} />
         )

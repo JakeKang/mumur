@@ -44,7 +44,7 @@ export function WorkbenchToolbar({
 }: WorkbenchToolbarProps) {
   return (
     <div className="mb-5 flex flex-wrap items-center gap-2">
-      {shouldShowSyncBadge ? (
+      {shouldShowSyncBadge && localSyncState !== "synced" ? (
         <span
           className={`inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface-strong)] px-2 py-1 text-xs transition-all duration-500 ${localSyncState === "failed" ? "text-rose-600" : localSyncState === "syncing" ? "text-sky-600" : "text-[var(--muted)]"} ${syncBadgeFading ? "opacity-0" : "opacity-100"}`}
         >
@@ -137,15 +137,6 @@ export function WorkbenchToolbar({
             </div>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="inline-flex h-8 items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs font-medium text-[var(--foreground)] transition hover:bg-rose-50 hover:text-rose-600"
-          aria-label="로그아웃"
-          title="로그아웃"
-        >
-          로그아웃
-        </button>
       </div>
     </div>
   );

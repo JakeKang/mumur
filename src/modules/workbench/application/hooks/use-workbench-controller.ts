@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { IDEA_STATUS, STATUS_META } from "@/features/ideas/constants/idea-status";
 import { apiRequest } from "@/shared/lib/api-client";
-import type { ConfirmDialogState, Session } from "@/shared/types";
+import type { ConfirmDialogState, Idea, Session } from "@/shared/types";
 import { useAuthSession } from "@/modules/workbench/application/hooks/use-auth-session";
 import { useClickOutside } from "@/modules/workbench/application/hooks/use-click-outside";
 import { useIdeaDetail } from "@/modules/workbench/application/hooks/use-idea-detail";
@@ -9,6 +9,7 @@ import { useIdeaList } from "@/modules/workbench/application/hooks/use-idea-list
 import { useNotificationManager } from "@/modules/workbench/application/hooks/use-notification-manager";
 import { useOfflineSync } from "@/modules/workbench/application/hooks/use-offline-sync";
 import { useProfileEditor } from "@/modules/workbench/application/hooks/use-profile-editor";
+import { useWorkbenchPageNavigation } from "@/modules/workbench/application/hooks/use-workbench-page-navigation";
 import { useSyncBadgeState } from "@/modules/workbench/application/hooks/use-sync-badge-state";
 import { useTeamManager } from "@/modules/workbench/application/hooks/use-team-manager";
 import { useWebhookManager } from "@/modules/workbench/application/hooks/use-webhook-manager";
@@ -19,6 +20,7 @@ import { blockSeed, formatTime } from "@/modules/workbench/domain/workbench-util
 import * as workbenchApi from "@/modules/workbench/infrastructure/workbench-api";
 
 const api = apiRequest;
+type FormSubmitEvent = Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0];
 
 export function useWorkbenchController() {
   const [error, setError] = useState("");
@@ -69,20 +71,23 @@ export function useWorkbenchController() {
     loadIdeas,
     loadDashboard,
     applyQuickStatusFilter,
-  } = useIdeaList({ api });
+  } = useIdeaList({ api, enabled: authed });
 
   const {
     userTeams,
+    pendingWorkspaceInvitations,
     selectedWorkspaceDetail,
     setSelectedWorkspaceDetail,
-    loadUserTeams,
     handleCreateWorkspace,
     handleUpdateWorkspace,
     handleDeleteWorkspace,
+    acceptPendingWorkspaceInvitation,
+    declinePendingWorkspaceInvitation,
     resetWorkspaceList,
   } = useWorkspaceList({
     api,
     activeWorkspaceId,
+    enabled: authed,
     onDeleteActiveWorkspace: async () => {
       await bootstrap();
     },
@@ -96,7 +101,6 @@ export function useWorkbenchController() {
     setNotificationFilters,
     mutedTypes,
     loadNotifications,
-    loadNotificationPreferences,
     markNotificationRead,
     markAllNotificationsRead,
     saveMutedTypes,
@@ -115,7 +119,7 @@ export function useWorkbenchController() {
     setTeamMemberForm,
     teamMe,
     teamInvitations,
-    teamInvitationMessage,
+    teamInvitationFeedback,
     loadTeamMembers,
     loadTeamInvitations,
     addTeamMember,
@@ -124,15 +128,14 @@ export function useWorkbenchController() {
     requestRemoveTeamMember,
     requestCancelInvitation,
     resetTeamState,
-  } = useTeamManager({ api, setConfirmDialog });
+  } = useTeamManager({ api, activeWorkspaceId, enabled: authed, setConfirmDialog });
 
   const {
     webhooks,
     webhookForm,
     setWebhookForm,
-    loadWebhooks,
     handleSaveWebhook,
-  } = useWebhookManager({ api, teamMe, setBusy, setError, loadNotifications });
+  } = useWebhookManager({ api, enabled: authed && Boolean(activeWorkspaceId), teamMe, setBusy, setError, loadNotifications });
 
   const {
     selectedIdeaId,
@@ -149,6 +152,7 @@ export function useWorkbenchController() {
     versionForm,
     setVersionForm,
     timeline,
+    ideaPresence,
     studioTab,
     setStudioTab,
     clearDetailState,
@@ -162,6 +166,8 @@ export function useWorkbenchController() {
     handleUploadBlockFile,
     handleCreateVersion,
     handleRestoreVersion,
+    reportActiveBlock,
+    clearPresenceHeartbeat,
     backToIdeas,
   } = useIdeaDetail({
     api,
@@ -245,15 +251,8 @@ export function useWorkbenchController() {
     setIdeas,
     setSelectedIdeaId,
     setDetailNotFound,
-    loadDashboard,
     loadIdeas,
     selectIdea,
-    loadNotifications,
-    loadNotificationPreferences,
-    loadWebhooks,
-    loadUserTeams,
-    loadTeamMembers,
-    loadTeamInvitations,
     connectStream,
     disconnectStream,
     resetTeamState,
@@ -270,7 +269,7 @@ export function useWorkbenchController() {
   }, [authed, filters, loadIdeas]);
 
   const handleCreateIdea = useCallback(
-    async (event: React.FormEvent<HTMLFormElement>) => {
+    async (event: FormSubmitEvent) => {
       event.preventDefault();
       if (!newIdeaForm.title.trim()) {
         return;
@@ -302,73 +301,24 @@ export function useWorkbenchController() {
     setCreateIdeaDialogOpen(true);
   }, []);
 
-  const handleNavigatePage = useCallback(
-    async (page: string) => {
-      if (page === "detail") {
-        if (selectedIdeaId) {
-          setActivePage("detail");
-          return;
-        }
-        if (sideIdeas.length) {
-          await selectIdea(sideIdeas[0].id, { syncUrl: true, openPage: true, workspaceId: sideIdeas[0].teamId });
-          return;
-        }
-        setActivePage("ideas");
-        return;
-      }
-
-      if (page === "workspace") {
-        if (!selectedWorkspaceDetail && activeWorkspaceId) {
-          setSelectedWorkspaceDetail(activeWorkspaceId);
-        }
-        setActivePage("workspace");
-        return;
-      }
-
-      setSelectedIdeaId(null);
-      setSelectedIdea(null);
-      setDetailNotFound(null);
-      setStudioTab("editor");
-      if (typeof window !== "undefined") {
-        const params = new URLSearchParams(window.location.search);
-        params.delete("idea");
-        const query = params.toString();
-        window.history.pushState(null, "", query ? `?${query}` : "/");
-      }
-      setActivePage(page);
-    },
-    [
-      activeWorkspaceId,
-      selectedIdeaId,
-      selectIdea,
-      selectedWorkspaceDetail,
-      setDetailNotFound,
-      setSelectedIdea,
-      setSelectedIdeaId,
-      setSelectedWorkspaceDetail,
-      setStudioTab,
-      sideIdeas,
-    ]
-  );
-
-  useEffect(() => {
-    if (activePage === "detail" && !selectedIdeaId) {
-      setActivePage("ideas");
-    }
-  }, [activePage, selectedIdeaId]);
+  const { handleNavigatePage } = useWorkbenchPageNavigation({
+    activePage,
+    setActivePage,
+    selectedIdeaId,
+    sideIdeas,
+    selectIdea,
+    selectedWorkspaceDetail,
+    activeWorkspaceId,
+    setSelectedWorkspaceDetail,
+    clearSelectedIdeaId: () => setSelectedIdeaId(null),
+    clearSelectedIdea: () => setSelectedIdea(null),
+    clearDetailNotFound: () => setDetailNotFound(null),
+    clearPresenceHeartbeat,
+    setStudioTab,
+    studioTab,
+  });
 
   useClickOutside(profileDropdownRef, profileDropdownOpen, () => setProfileDropdownOpen(false));
-
-  useEffect(() => {
-    if (activePage !== "detail" || studioTab !== "editor" || !selectedIdeaId) {
-      return;
-    }
-    const raf = window.requestAnimationFrame(() => {
-      const titleInput = document.querySelector("main textarea") as HTMLTextAreaElement | null;
-      titleInput?.focus();
-    });
-    return () => window.cancelAnimationFrame(raf);
-  }, [activePage, selectedIdeaId, studioTab]);
 
   const blocks = selectedIdea?.blocks || [];
   const canEditIdea = Boolean(teamMe.role) && teamMe.role !== "viewer";
@@ -434,6 +384,29 @@ export function useWorkbenchController() {
     [loadDashboard, loadIdeas]
   );
 
+  const visibleIdeas = sideIdeas as Idea[];
+
+  const acceptWorkspaceInvitationAction = useCallback(
+    async (invitationId: number) => {
+      const result = await acceptPendingWorkspaceInvitation(invitationId);
+      const workspaceId = Number(result?.workspace?.id || 0);
+      if (workspaceId > 0) {
+        await handleSwitchTeam(workspaceId);
+      } else {
+        await bootstrap();
+      }
+    },
+    [acceptPendingWorkspaceInvitation, bootstrap, handleSwitchTeam]
+  );
+
+  const declineWorkspaceInvitationAction = useCallback(
+    async (invitationId: number) => {
+      await declinePendingWorkspaceInvitation(invitationId);
+      await bootstrap();
+    },
+    [bootstrap, declinePendingWorkspaceInvitation]
+  );
+
   return {
     authed,
     error,
@@ -441,27 +414,30 @@ export function useWorkbenchController() {
     workbenchActionsContextValue,
     shellProps: {
       mobileNavOpen,
-      onOpenMobileNav: () => setMobileNavOpen(true),
-      onCloseMobileNav: () => setMobileNavOpen(false),
+      onOpenMobileNavAction: () => setMobileNavOpen(true),
+      onCloseMobileNavAction: () => setMobileNavOpen(false),
       activePage,
-      onNavigatePage: handleNavigatePage,
+      onNavigatePageAction: handleNavigatePage,
       navCollapsed,
       userName: session?.user?.name || "Mumur 사용자",
       workspaceName: session?.workspace?.name || "워크스페이스",
       userWorkspaces: userTeams,
+      pendingInvitations: pendingWorkspaceInvitations,
       activeWorkspaceId: session?.workspace?.id ?? null,
-      onSwitchWorkspace: handleSwitchTeam,
-      onEnterWorkspace: handleEnterWorkspace,
+      onSwitchWorkspaceAction: handleSwitchTeam,
+      onEnterWorkspaceAction: handleEnterWorkspace,
       selectedWorkspaceId: selectedWorkspaceDetail,
-      onCreateWorkspace: handleCreateWorkspace,
-      onUpdateWorkspace: handleUpdateWorkspace,
-      onDeleteWorkspace: handleDeleteWorkspace,
+      onCreateWorkspaceAction: handleCreateWorkspace,
+      onUpdateWorkspaceAction: handleUpdateWorkspace,
+      onDeleteWorkspaceAction: handleDeleteWorkspace,
+      onAcceptInvitationAction: acceptWorkspaceInvitationAction,
+      onDeclineInvitationAction: declineWorkspaceInvitationAction,
       workspaceSwitching,
-      onToggleNavCollapse: () => setNavCollapsed((prev) => !prev),
-      onEditProfile: openProfileEdit,
-      onLogout: handleLogout,
+      onToggleNavCollapseAction: () => setNavCollapsed((prev) => !prev),
+      onEditProfileAction: openProfileEdit,
+      onLogoutAction: handleLogout,
       notificationPanelOpen,
-      onCloseNotificationPanel: closeUtilityPanel,
+      onCloseNotificationPanelAction: closeUtilityPanel,
     },
     notificationPanelProps: {
       activePage,
@@ -482,6 +458,8 @@ export function useWorkbenchController() {
       markNotificationRead,
       deleteNotification,
       formatTime,
+      onAcceptInvitation: acceptWorkspaceInvitationAction,
+      onDeclineInvitation: declineWorkspaceInvitationAction,
     },
     toolbarProps: {
       shouldShowSyncBadge,
@@ -507,11 +485,11 @@ export function useWorkbenchController() {
       dashboardProps: {
         dashboard,
         loading: busy || !dashboard,
-        ideas: sideIdeas,
+        ideas: visibleIdeas,
         STATUS_META,
       },
       ideasProps: {
-        ideas: sideIdeas,
+        ideas: visibleIdeas,
         filters,
         setFilters,
         ideaView,
@@ -551,11 +529,13 @@ export function useWorkbenchController() {
           versionForm,
           setVersionForm,
           versions,
-          timeline,
-          teamMembers,
-          handleUploadBlockFile,
+            timeline,
+            teamMembers,
+            handleUploadBlockFile,
+            ideaPresence,
+            reportActiveBlock,
+          },
         },
-      },
       teamProps: {
         teamMembers,
         teamMemberForm,
@@ -566,7 +546,7 @@ export function useWorkbenchController() {
         teamInvitations,
         retryTeamInvitation,
         requestCancelInvitation,
-        teamInvitationMessage,
+        teamInvitationFeedback,
         webhooks,
         webhookForm,
         setWebhookForm,
@@ -575,7 +555,7 @@ export function useWorkbenchController() {
       },
       workspaceProps: {
         workspace,
-        ideas: sideIdeas,
+        ideas: visibleIdeas,
         STATUS_META,
         onUpdateWorkspace: onUpdateSelectedWorkspace,
         onDeleteWorkspace: onDeleteSelectedWorkspace,
